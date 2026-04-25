@@ -421,15 +421,20 @@ export function clientToDrafts(c: ClientRecord): FactDraft[] {
     });
   }
   if (c.contact_person_name) {
+    // Email is intentionally excluded from claim+excerpt: scan.ts redacts any
+    // address outside ALLOWED_EMAIL_DOMAINS, and per PIPELINE.md the redacted
+    // claim is replaced wholesale ("Original NEVER persisted"). Keeping the
+    // email here would lose the entire fact. The contact NAME is the useful
+    // datum and stays in metric.value.
     drafts.push({
       entity: slug,
-      claim: `${c.business_name} primary contact: ${c.contact_person_name}${c.contact_email ? ` <${c.contact_email}>` : ''}.`,
+      claim: `${c.business_name} primary contact: ${c.contact_person_name}.`,
       metric: {
         key: 'primary_contact',
         value: c.contact_person_name,
       },
       sourceRef: ref,
-      sourceExcerpt: `contact: ${c.contact_person_name}${c.contact_email ? `, ${c.contact_email}` : ''}`,
+      sourceExcerpt: `contact: ${c.contact_person_name}`,
       observedAt: observed,
     });
   }

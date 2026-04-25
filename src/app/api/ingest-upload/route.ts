@@ -168,6 +168,9 @@ export async function POST(req: Request) {
       const t0 = Date.now();
       try {
         const totalBytes = files.reduce((s, f) => s + f.size, 0);
+        console.log(
+          `[ingest-upload] SSE stream opened · phase=init files=${files.length} totalMB=${(totalBytes / 1024 / 1024).toFixed(1)}`,
+        );
         send({
           phase: 'init',
           message: `Receiving ${files.length} file${
@@ -256,6 +259,7 @@ export async function POST(req: Request) {
           });
           try {
             pipelineDrafts = await extractFactsFromChunks(allChunks, {
+              permissive: true,
               onProgress: (ev) => {
                 send({
                   phase: 'extract',

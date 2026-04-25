@@ -131,6 +131,15 @@ export async function extractFactsFromChunks(
     /** Called after every Pioneer batch with progress. UI uses this to
      *  drive the "extract" phase progress bar during big drops. */
     onProgress?: (ev: { done: number; total: number }) => void;
+    /**
+     * Workspace-agnostic mode. The default (strict) path is tuned for the
+     * Northwind SaaS demo cast (ENTITY_ALIASES, ALLOWED_METRIC_KEYS, money
+     * regexes). Permissive mode trusts `chunk.defaultEntity` as the entity
+     * anchor and accepts any non-noise metric key, so non-Northwind datasets
+     * (e.g. Inazuma D2C) actually produce drafts instead of being whitelisted
+     * to zero. Use only when the caller controls `defaultEntity`.
+     */
+    permissive?: boolean;
   },
 ): Promise<FactDraft[]> {
   const filtered = chunks
@@ -138,6 +147,7 @@ export async function extractFactsFromChunks(
     .filter((c) => c.text.trim().length > 0);
   if (filtered.length === 0) return [];
 
+  const permissive = opts?.permissive ?? false;
   const drafts: FactDraft[] = [];
   opts?.onProgress?.({ done: 0, total: filtered.length });
   for (let i = 0; i < filtered.length; i += MAX_BATCH) {
@@ -152,8 +162,8 @@ export async function extractFactsFromChunks(
     const blocks = Array.isArray(resp.result) ? resp.result : [resp.result];
 
     batch.forEach((chunk, idx) => {
-      const raw = blockToDraft(blocks[idx], chunk);
-      const cleaned = postProcessDraft(raw, chunk);
+      const raw = blockToDraft(blocks[idx], chunk, permissive);
+      const cleaned = postProcessDraft(raw, chunk, permissive);
       for (const d of cleaned) drafts.push(d);
     });
     opts?.onProgress?.({
@@ -243,8 +253,26 @@ const FTE_PATTERN = /\b(\d{1,4})\s*(?:fte|fulltime|full-time)\b|\b(\d{1,4})-pers
  *   [d]   — usual case
  *   [a,b] — split (TechCo: seats + churn from one chunk)
  */
-function postProcessDraft(draft: FactDraft | null, chunk: Chunk): FactDraft[] {
+function postProcessDraft(
+  draft: FactDraft | null,
+  chunk: Chunk,
+  permissive = false,
+): FactDraft[] {
   if (!draft) return [];
+
+  // Permissive path: trust the extractor + defaultEntity, skip the SaaS-
+  // specific entity routing + ALLOWED_METRIC_KEYS gate. But still require a
+  // real (key, value) — drafts with no metric are bare email floss
+  // ("Best regards…") that pollute the ledger and don't cluster in conflicts.
+  if (permissive) {
+    const mk = draft.metric?.key;
+    const mv = draft.metric?.value?.trim() ?? '';
+    if (!mk || !mv) return [];
+    if (PERIOD_KEY_RE.test(mk.replace(/\s+/g, '_'))) return [];
+    if (/^q[1-4]\s*20\d{2}$/i.test(mv)) return [];
+    if (/^\d+(\.\d+)?x$/i.test(mv)) return [];
+    return [draft];
+  }
 
   const text = chunk.text;
   const lc = text.toLowerCase();
@@ -593,7 +621,11 @@ function normalizeMoneyValue(
   return { value: v, unit: u };
 }
 
-function blockToDraft(block: RawResultBlock | undefined, chunk: Chunk): FactDraft | null {
+function blockToDraft(
+  block: RawResultBlock | undefined,
+  chunk: Chunk,
+  permissive = false,
+): FactDraft | null {
   const row = block?.fact?.[0];
   const metricKeyRaw = (row?.metric_key ?? '').toString().trim();
   const metricValue = (row?.metric_value ?? '').toString().trim();
@@ -612,11 +644,14 @@ function blockToDraft(block: RawResultBlock | undefined, chunk: Chunk): FactDraf
 
   const entitySpan = (row?.entity ?? '').toString().trim();
   const slugFromSpan = entitySpan ? canonicalizeEntity(entitySpan) : null;
-  // Fall back to the source-implied entity if the span miss / drifts —
-  // but only when there's an actual metric to anchor the fact.
-  const slug =
-    slugFromSpan ??
-    (metric && chunk.defaultEntity ? chunk.defaultEntity : null);
+  // Strict mode (Northwind cast): the canonical span wins; defaultEntity
+  // is only the fallback, and only when a metric anchors the claim.
+  // Permissive mode (e.g. Inazuma): the dataset's defaultEntity is the
+  // ground truth — Pioneer's span is informational. A draft without a
+  // canonical metric is still useful (the chunk text becomes the claim).
+  const slug = permissive
+    ? (chunk.defaultEntity ?? slugFromSpan ?? null)
+    : (slugFromSpan ?? (metric && chunk.defaultEntity ? chunk.defaultEntity : null));
   if (!slug) return null;
 
   const rawObserved = (row?.observed_at ?? '').toString().trim();

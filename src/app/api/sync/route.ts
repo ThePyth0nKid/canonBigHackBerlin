@@ -60,26 +60,16 @@ async function runSync(req: Request): Promise<Response> {
 
   const url = new URL(req.url);
   const skipAudit = url.searchParams.get('audit') === 'off';
-  // Workspace-scope the sync. Slack/Gmail/PDF only feed Northwind; reject
-  // any request that wants to sync into a different workspace, otherwise
-  // we'd trash that workspace's facts in the post-sync prune.
-  const requestedWs = (url.searchParams.get('ws') ?? 'northwind').toLowerCase();
-  if (requestedWs !== 'northwind') {
-    return NextResponse.json(
-      {
-        error: 'workspace_not_syncable',
-        message: `Workspace "${requestedWs}" has no live sync path. Use scripts/ingest-qontext.ts for Inazuma.`,
-      },
-      { status: 400 },
-    );
-  }
-  const workspace = 'northwind';
+  // Post-pivot: synthetic Slack/Gmail/PDF lands alongside the Qontext
+  // dataset in the unified `inazuma` workspace. The chain stays one
+  // chain; multiple source kinds, one canonical view.
+  const workspace = 'inazuma';
 
   // Capture the cutoff BEFORE any new signing happens. We never delete first —
   // if mid-sync something fails, the old chain is still intact for /app to
   // render. Old facts get cleared only AFTER at least one source successfully
-  // produces fresh signed events (signedAt > t0). Scoped to this workspace so
-  // a Northwind sync never touches Inazuma facts.
+  // produces fresh signed events (signedAt > t0). The prune below is also
+  // scoped by sourceRef prefix so the Qontext dataset facts are never touched.
   const syncStartedAt = new Date(t0);
 
   const sources: SyncSummary['sources'] = [];
@@ -135,16 +125,34 @@ async function runSync(req: Request): Promise<Response> {
     await signer.close();
   }
 
-  // Now that fresh facts are persisted, drop the pre-sync chain — but ONLY if
-  // we actually have new facts to replace it. Prevents a half-failed sync from
-  // wiping the demo state on stage. SCOPED to this workspace so it never
-  // touches the other workspace's chain.
+  // Now that fresh facts are persisted, drop the pre-sync slack/gmail/pdf
+  // chain — but ONLY if we actually have new ones to replace them, AND
+  // ONLY for the synthetic source kinds. The Qontext dataset facts in the
+  // same workspace are never touched here.
   const freshCount = await prisma.factEvent.count({
-    where: { userId, workspace, signedAt: { gte: syncStartedAt } },
+    where: {
+      userId,
+      workspace,
+      signedAt: { gte: syncStartedAt },
+      OR: [
+        { sourceRef: { startsWith: 'slack:' } },
+        { sourceRef: { startsWith: 'gmail:' } },
+        { sourceRef: { startsWith: 'pdf:' } },
+      ],
+    },
   });
   if (freshCount > 0) {
     await prisma.factEvent.deleteMany({
-      where: { userId, workspace, signedAt: { lt: syncStartedAt } },
+      where: {
+        userId,
+        workspace,
+        signedAt: { lt: syncStartedAt },
+        OR: [
+          { sourceRef: { startsWith: 'slack:' } },
+          { sourceRef: { startsWith: 'gmail:' } },
+          { sourceRef: { startsWith: 'pdf:' } },
+        ],
+      },
     });
   }
 

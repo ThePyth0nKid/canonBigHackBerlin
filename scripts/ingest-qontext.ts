@@ -48,8 +48,14 @@ async function main() {
   console.log('');
 
   // 1. Run Pioneer over the chunks (emails + conversations) → FactDrafts.
+  // Permissive mode: Inazuma chunks set defaultEntity='inazuma' and use a
+  // vocabulary outside Pioneer's Northwind-tuned whitelist. Without
+  // permissive, ALLOWED_METRIC_KEYS + entity-correction would drop ~all
+  // drafts (verified empirically: 0/166 chunks before this flag).
   console.log('extracting via Pioneer …');
-  const pipelineDrafts = await extractFactsFromChunks(sample.pipelineChunks);
+  const pipelineDrafts = await extractFactsFromChunks(sample.pipelineChunks, {
+    permissive: true,
+  });
   console.log(`Pioneer extracted ${pipelineDrafts.length} drafts from chunks.`);
   console.log('');
 

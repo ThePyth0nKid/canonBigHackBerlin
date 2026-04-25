@@ -13,7 +13,6 @@ import { ConflictResolve } from './_components/conflict-resolve';
 import { SourcePill } from './_components/source-pill';
 import { AikidoRepoBanner } from './_components/aikido-banner';
 import { SyncButton } from './_components/sync-button';
-import { WorkspaceSwitcher } from './_components/workspace-switcher';
 import { FileDropIngest } from './_components/file-drop-ingest';
 
 export const dynamic = 'force-dynamic';
@@ -28,34 +27,11 @@ export default async function WorkspacePage({
   const userId = (session.user as { id?: string }).id;
   if (!userId) redirect('/login');
 
-  const sp = await searchParams;
-  const wsParam = sp?.ws ?? 'all';
-  const activeWorkspace =
-    WORKSPACES.find((w) => w.slug === wsParam)?.slug ?? 'all';
-
-  // Per-workspace fact counts for the switcher badges. The 'all' badge
-  // is the row total — every chain combined — so the unified view
-  // shows "All sources · 3107" while individual chains show their own
-  // counts.
-  const counts = await prisma.factEvent.groupBy({
-    by: ['workspace'],
-    where: { userId, status: 'active' },
-    _count: { _all: true },
-  });
-  const badges: Record<string, string> = {};
-  let total = 0;
-  for (const c of counts) total += c._count._all;
-  for (const w of WORKSPACES) {
-    if (w.slug === 'all') {
-      badges[w.slug] = `${total}`;
-      continue;
-    }
-    const c = counts.find((x) => x.workspace === w.slug);
-    badges[w.slug] = c ? `${c._count._all}` : '0';
-  }
-
-  const wsMeta =
-    WORKSPACES.find((w) => w.slug === activeWorkspace) ?? WORKSPACES[0];
+  // Single workspace post-pivot — UI no longer exposes the workspace
+  // concept. Background ledger keeps `workspace` for chain isolation;
+  // every UI fetch hits 'inazuma'.
+  const activeWorkspace = 'inazuma';
+  const wsMeta = WORKSPACES[0];
 
   return (
     <main className="flex flex-1 flex-col px-6 py-10">
@@ -64,22 +40,10 @@ export default async function WorkspacePage({
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="flex items-center gap-3">
               <h1 className="text-3xl font-semibold tracking-tight">
-                {workspaceTitle(activeWorkspace)}
+                Your business · canonized
               </h1>
-              <span
-                className={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-[0.14em] ${
-                  activeWorkspace === 'all'
-                    ? 'border-zinc-500/40 bg-zinc-500/10 text-zinc-700 dark:text-zinc-300'
-                    : activeWorkspace === 'northwind'
-                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
-                      : 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-400'
-                }`}
-              >
-                {activeWorkspace === 'all'
-                  ? 'unified ledger'
-                  : activeWorkspace === 'northwind'
-                    ? 'synthetic CFO'
-                    : 'qontext dataset'}
+              <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-sky-700 dark:text-sky-400">
+                signed ledger
               </span>
             </div>
             <form
@@ -98,26 +62,17 @@ export default async function WorkspacePage({
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <WorkspaceSwitcher
-              active={activeWorkspace}
-              workspaces={WORKSPACES}
-              badges={badges}
-            />
-            {wsMeta && (
-              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                {wsMeta.description}
-              </span>
-            )}
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+              {wsMeta.description}
+            </span>
+            <SyncButton />
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-900">
+          <div className="border-t border-zinc-200 pt-4 dark:border-zinc-900">
             <AikidoRepoBanner />
-            {activeWorkspace === 'northwind' && <SyncButton />}
           </div>
 
-          {activeWorkspace !== 'northwind' && (
-            <FileDropIngest workspace={uploadTarget(activeWorkspace)} />
-          )}
+          <FileDropIngest workspace="inazuma" />
         </header>
 
         <Suspense
@@ -212,23 +167,6 @@ function LandscapeSkeleton({ workspace }: { workspace: string }) {
   );
 }
 
-function workspaceTitle(slug: string): string {
-  if (slug === 'all') return 'Your business · canonized';
-  if (slug === 'inazuma') return 'Inazuma.co';
-  return 'Northwind Software';
-}
-
-/**
- * The drop-zone lives on the unified view + the inazuma view. From 'all'
- * we route uploads into the dedicated 'main' workspace so the user's own
- * data stays distinct from the two synthetic demo chains. Picking the
- * 'inazuma' tab still routes uploads into 'inazuma' for jurors who want
- * to see uploads merged into the Qontext dataset.
- */
-function uploadTarget(active: string): 'main' | 'inazuma' {
-  return active === 'inazuma' ? 'inazuma' : 'main';
-}
-
 function Stat({
   label,
   value,
@@ -254,23 +192,18 @@ function Stat({
   );
 }
 
-function EmptyState({ workspace }: { workspace: string }) {
+function EmptyState({ workspace: _workspace }: { workspace: string }) {
   return (
     <div className="mt-12 rounded-2xl border border-dashed border-zinc-300 bg-white p-14 text-center dark:border-zinc-800 dark:bg-zinc-950">
       <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-400">
         empty workspace
       </p>
       <p className="mt-3 text-base text-zinc-700 dark:text-zinc-300">
-        {workspace === 'all'
-          ? 'No signed facts yet — your unified view is empty.'
-          : workspace === 'northwind'
-            ? 'Northwind chain is empty.'
-            : 'Inazuma chain is empty.'}
+        No signed facts yet.
       </p>
       <p className="mt-1 text-sm text-zinc-500">
-        {workspace === 'northwind'
-          ? 'Click Sync now to ingest from Slack, Gmail, and the Q1 board deck.'
-          : 'Drop a file or folder above to ingest your own data.'}
+        Drop a file above to ingest your own data, or click Sync to add the
+        Slack / Gmail / PDF synthetic sources.
       </p>
     </div>
   );
@@ -290,7 +223,7 @@ const INAZUMA_DEMO_GOLD = new Set([
 
 function Landscape({
   entities,
-  workspace,
+  workspace: _workspace,
 }: {
   entities: EntityGroup[];
   workspace: string;
@@ -305,19 +238,17 @@ function Landscape({
     );
   }
 
-  // Featured rotates by view: 'all' surfaces the Northwind primary
-  // entities (the synthetic CFO chain) AND the Inazuma demo-gold ones
-  // up top, then collapses everything else. Same pattern, two chains.
-  const NORTHWIND_FEATURED = new Set([
+  // Inazuma has 100+ entities. Surface the demo-gold conflict-rich
+  // names up top, collapse everything else behind a <details>.
+  // Synthetic Slack/Gmail/PDF lands in inazuma post-pivot too, so the
+  // featured list also includes the Northwind cast.
+  const FEATURED = new Set([
+    ...INAZUMA_DEMO_GOLD,
     'northwind', 'acme', 'techco', 'globex', 'initech', 'umbrella', 'soylent',
   ]);
-  const featuredSet =
-    workspace === 'all'
-      ? new Set([...NORTHWIND_FEATURED, ...INAZUMA_DEMO_GOLD])
-      : INAZUMA_DEMO_GOLD;
 
-  const featured = entities.filter((e) => featuredSet.has(e.slug));
-  const tail = entities.filter((e) => !featuredSet.has(e.slug));
+  const featured = entities.filter((e) => FEATURED.has(e.slug));
+  const tail = entities.filter((e) => !FEATURED.has(e.slug));
 
   return (
     <div className="mt-10 space-y-12">

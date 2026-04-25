@@ -67,19 +67,9 @@ const ENTITY_DISPLAY: Record<string, string> = {
 
 export const WORKSPACES = [
   {
-    slug: 'all',
-    label: 'All sources',
-    description: 'Unified view · every signed fact across every source',
-  },
-  {
-    slug: 'northwind',
-    label: 'Northwind',
-    description: 'Synthetic CFO data · Slack/Gmail/PDF',
-  },
-  {
     slug: 'inazuma',
     label: 'Inazuma.co',
-    description: 'Qontext dataset · 11 systems',
+    description: 'Your business · canonized across every source',
   },
 ] as const;
 
@@ -119,19 +109,10 @@ export interface FactLandscape {
 
 export async function loadFactLandscape(
   userId: string,
-  workspace: string = 'all',
+  workspace: string = 'inazuma',
 ): Promise<FactLandscape> {
-  // 'all' is a UI-only union view: skip the workspace filter so the
-  // landscape fans out across every chain the user has signed into.
-  // Real workspaces ('main', 'northwind', 'inazuma', …) filter as
-  // before; that's how uploads + sync stay isolated for hash-chain
-  // integrity even though the default view is unified.
-  const where =
-    workspace === 'all'
-      ? { userId, NOT: { status: 'resolution' } }
-      : { userId, workspace, NOT: { status: 'resolution' } };
   const rows = await prisma.factEvent.findMany({
-    where,
+    where: { userId, workspace, NOT: { status: 'resolution' } },
     orderBy: { signedAt: 'asc' },
     take: 8000,
   });
