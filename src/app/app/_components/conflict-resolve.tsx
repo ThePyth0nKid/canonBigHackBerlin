@@ -25,17 +25,23 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
   if (competing.length < 2) return null;
 
   // Cluster competing facts by metric value so multiple sources for the same
-  // value land in the same column. Latest cluster first.
-  const clusters = clusterByValue(competing);
+  // value land in the same column. Latest + biggest cluster first. Cap at top
+  // 3 visible columns — beyond that the modal gets unreadable on stage; the
+  // tail-end clusters remain accessible from "view proof" on individual rows.
+  const allClusters = clusterByValue(competing);
+  const clusters = allClusters.slice(0, 3);
+  const overflow = allClusters.length - clusters.length;
 
   return (
     <>
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="rounded-full border border-amber-300 bg-amber-50 px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-900 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200"
+        className="inline-flex items-center gap-1.5 rounded-md border border-amber-400 bg-amber-50 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-amber-900 transition-colors hover:bg-amber-100 dark:border-amber-600/60 dark:bg-amber-500/10 dark:text-amber-300 dark:hover:bg-amber-500/20"
       >
-        ⚠ resolve
+        <span aria-hidden>⚠</span>
+        Resolve conflict
+        <span aria-hidden className="opacity-60">→</span>
       </button>
       {open && (
         <div
@@ -52,7 +58,7 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
                   resolve conflict · {entity}.{metricKey}
                 </p>
                 <h2 className="mt-1 text-lg font-semibold">
-                  {clusters.length} competing claims · pick the source of truth.
+                  {allClusters.length} competing claims · pick the source of truth.
                 </h2>
                 <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
                   Your pick gets signed with the same Ed25519 key as the
@@ -77,6 +83,7 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
               }`}
             >
               {clusters.map((c) => {
+                /* one column per value cluster — top 3 only */
                 const head = c[0];
                 const sources = [...new Set(c.map((f) => sourceKindOf(f.sourceRef)))];
                 const latest = c.reduce<Date | null>((acc, f) => {
@@ -146,6 +153,16 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
                 );
               })}
             </div>
+            {overflow > 0 && (
+              <p className="mt-4 font-mono text-[11px] text-zinc-500">
+                + {overflow} weitere kleinere Cluster · audit-history bleibt
+                via{' '}
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                  view proof
+                </span>{' '}
+                auf einzelnen Facts.
+              </p>
+            )}
           </div>
         </div>
       )}
