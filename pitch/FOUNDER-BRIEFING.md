@@ -20,33 +20,40 @@ Die zwei Worte die alles tragen: **„signed"** und **„context layer"**. „Si
 ## Architektur in einem Bild
 
 ```
-   Slack       Gmail       PDF
-     ↓           ↓           ↓
+   Slack / Gmail / PDF / Qontext-dataset / …
+                  ↓
    ┌─────────────────────────────┐
-   │  Layer 1 — Pioneer           │   span-extraction (GLiNER-2)
+   │  Layer 1 — Pioneer (Fastino) │   span-extraction (GLiNER-2)
    │  „same input → same output"  │   deterministisch, hash-stabil
    └─────────────────────────────┘
-                 ↓
+                  ↓
+   ┌─────────────────────────────┐  ┌────────────────────────┐
+   │  Layer 2 — Gemini 2.5-flash  │  │ Layer 2.5 — Tavily     │
+   │  „liest die ganze Quelle"    │  │ external web context   │
+   │  fail-closed on error        │  │ ⚠ unsigned tag         │
+   └─────────────────────────────┘  └────────────────────────┘
+                  ↓
    ┌─────────────────────────────┐
-   │  Layer 2 — Gemini 2.5-flash  │   long-context auditor
-   │  „liest die ganze Quelle"    │   contradiction-flagging, fail-closed
+   │  Layer 3 — Aikido + lokal    │   secret/PII refusal
+   │  „refuse to canonize"        │   plus recursive-trust banner
    └─────────────────────────────┘
-                 ↓
-   ┌─────────────────────────────┐
-   │  Layer 3 — Aikido + scan     │   secret/PII refusal
-   │  „refuse to canonize"        │   plus repo-health-banner
-   └─────────────────────────────┘
-                 ↓
+                  ↓
    ┌─────────────────────────────┐
    │  Layer 4 — canon-signer      │   Ed25519 + COSE_Sign1
-   │  „every fact tamper-proof"   │   hash-chained, offline-verifiable
+   │  „every fact tamper-proof"   │   PER-WORKSPACE hash chain
    └─────────────────────────────┘
-                 ↓
+                  ↓
    ┌─────────────────────────────┐
-   │  MCP-Server                  │   canon_lookup / search / cite / diff
-   │  „every agent reads Canon"   │   stdio + Claude Desktop / Cursor
+   │  MCP-Server (6 tools)        │   workspaces / lookup / search / cite /
+   │  „every agent reads Canon"   │   diff / external_lookup (+ write stub)
    └─────────────────────────────┘
+                  ↓
+            workspace=northwind  ·  workspace=inazuma
+            (demo, slack/gmail/pdf)  (Qontext dataset)
+            ~50 facts, 6 entities    ~310 facts, 105 entities, 6 conflicts
 ```
+
+**Eligible-partner-tech accounting (BBH submission rule):** Pioneer + Gemini + Tavily = 3 ✓. Aikido is an additional Layer-3 trust contribution outside the eligibility list.
 
 ---
 
@@ -149,12 +156,13 @@ Memorize especially: **„stateless Sidecar, HSM-ready at boot, 30-line config s
 
 **Was es technisch tut:**
 - Standalone Node-Script `mcp/canon-mcp.ts`, stdio-Transport via `@modelcontextprotocol/sdk`.
-- 5 Tools registriert: `canon_lookup`, `canon_search`, `canon_cite`, `canon_diff` (alle live), `canon_write` (v0.2 Stub).
+- **6 Tools** registriert: `canon_workspaces`, `canon_lookup`, `canon_search`, `canon_cite`, `canon_diff`, `canon_external_lookup` (Tavily, returns `unsigned: true`); plus `canon_write` als v0.2 Stub.
+- **Workspace-aware:** lookup/search/cite/diff nehmen einen `workspace`-Param (default `northwind`); `canon_workspaces` listet die verfügbaren mit fact-counts.
 - User-scope registriert in `~/.claude.json` — bei jedem `claude` Aufruf in jedem cwd verfügbar.
 - Tool-Beschreibungen routen: `[CALL THIS FIRST for any question about a CUSTOMER, COMPANY, ACCOUNT...]`. Verifizierte Routing-Logik — Live-Test Sa nachmittag passed.
 
 **Was du auf der Bühne sagst:**
-> *„Canon spricht MCP nativ. Fünf Tools: lookup, search, cite, diff, write. Mount-bar in Claude Desktop, Cursor, Windsurf, Zed — jede ernsthafte IDE in 2026. Stdio-Transport, stateless, eine Config-Datei lang. Hier — schau mal."*
+> *„Canon spricht MCP nativ. Sechs Tools — lookup, search, cite, diff, external-lookup, workspaces. Workspace-aware: ein Canon-MCP, mehrere Tenants. Tavily für public-web-Kontext, explizit als unsigned getaggt. Mount-bar in Claude Desktop, Cursor, Windsurf, Zed. Eine Config-Datei lang."*
 
 Dann das live-Demo: in Cursor fragst du „Was wissen wir über ACME?". Claude ruft `canon_lookup` autonom auf. Slide 6 macht den Punkt.
 

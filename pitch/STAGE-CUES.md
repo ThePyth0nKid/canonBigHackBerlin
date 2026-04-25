@@ -35,9 +35,10 @@
 | 1:04   | 4     | Click `view proof →` on Q1 MRR €127k. Click **Verify signature**. | If verify shows ✗: skip — say "the binary verifies it offline". |
 | 1:12   | 4     | Cmd-Tab to Cursor. Type "Was wissen wir über ACME mit kryptographischem Beweis?" | If MCP cold-start lags: say "watch the routing decision live", point at the canon_lookup call. |
 | 1:24   | 5     | Slide 5. Optional: pause on canon_cite output if visible. | Skip click if behind.                         |
-| 1:35   | 6     | Slide 6. Eye contact with Qontext jurors.              | —                                             |
-| 1:48   | 7     | Slide 7. Pricing line. Land the one-sentence pitch.    | —                                             |
-| 1:55   | —     | "Danke." Don't fill the silence.                       | —                                             |
+| 1:32   | 6     | Slide 6 on screen. **Cmd-Tab back to /app, click workspace switcher → Inazuma.** Workspace badge updates from "northwind 50" to "inazuma ~310". Point at miller_group / huang_llc in the demo-gold list. Don't click into them. | If Inazuma view blank or errors: stay on slide 6, say "Inazuma is live at canon.ultranova.io/app?ws=inazuma — same code, your dataset". |
+| 1:42   | 6     | Eye contact with Qontext jurors. "Same pipeline, your data, six conflicts straight from clients.json." | —                                             |
+| 1:50   | 7     | Slide 7. Pricing line. Land the one-sentence pitch.    | —                                             |
+| 1:58   | —     | "Danke." Don't fill the silence.                       | —                                             |
 
 ---
 
@@ -79,6 +80,7 @@
 
 ## Numbers you must NOT mix up
 
+### Northwind workspace (live demo on slide 4)
 | Fact                       | Value         |
 |----------------------------|---------------|
 | Q1 MRR (final)             | **€127,000**  |
@@ -94,7 +96,23 @@
 | Globex seats               | 25 (final)    |
 | Initech seats              | 18 (monthly)  |
 | Q2 pipeline (weighted)     | €444,000      |
-| Pricing (hosted Canon)     | €0.001/event  |
+
+### Inazuma workspace (Qontext-supplied — slide 6 beat)
+| Fact                              | Value             |
+|-----------------------------------|-------------------|
+| Total active facts ingested       | **~310**          |
+| Distinct entities                 | ~105              |
+| Industry conflicts surfaced       | **6**             |
+| Names of those 6                  | Miller Group, Gonzalez Inc, Johnson Group, Huang LLC, Williams Group, Martin Ltd |
+| PII redactions caught (Layer 3)   | **40**            |
+| Source records sampled            | 40 clients + 40 vendors + 12 customers + 15 employees + 30 emails + 15 conversations + 10 posts |
+| Total dataset size                | ~100 MB · 11 systems · 637 files · 14 JSON datasets |
+
+### Brand
+| Pricing (hosted Canon)     | €0.001/event after 10k free |
+| Self-host                  | MIT, free |
+| Live URL                   | canon.ultranova.io |
+| Repo                       | github.com/ThePyth0nKid/canonBigHackBerlin |
 
 If you blank: say "the Q1 number" not a wrong number.
 
