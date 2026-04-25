@@ -102,9 +102,29 @@ export function AskCanon() {
       )}
 
       {error && (
-        <p className="mt-3 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-700/50 dark:bg-rose-950/40 dark:text-rose-200">
-          {error}
-        </p>
+        <div className="mt-3 rounded-lg border border-rose-300 bg-rose-50 p-3 dark:border-rose-700/50 dark:bg-rose-950/40">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="font-mono text-[10px] uppercase tracking-wider text-rose-600 dark:text-rose-400">
+                ask canon failed
+              </p>
+              <p className="mt-1 text-sm text-rose-900 dark:text-rose-100">{error}</p>
+              {question && (
+                <p className="mt-1 truncate font-mono text-[10px] text-rose-700/80 dark:text-rose-300/70">
+                  question: “{question}”
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => submit(question)}
+              disabled={pending || !question.trim()}
+              className="inline-flex h-7 shrink-0 items-center justify-center rounded-full border border-rose-400 bg-white px-3 font-mono text-[10px] font-semibold uppercase tracking-wider text-rose-800 transition-colors hover:bg-rose-100 disabled:opacity-60 dark:border-rose-600 dark:bg-rose-900/30 dark:text-rose-200 dark:hover:bg-rose-900/60"
+            >
+              retry
+            </button>
+          </div>
+        </div>
       )}
 
       {answer && !pending && <AnswerBlock answer={answer} />}

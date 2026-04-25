@@ -122,9 +122,20 @@ export async function askCanon(args: {
 }): Promise<CanonAnswer | { error: string }> {
   const t0 = Date.now();
   const q = args.question.trim();
-  if (!q) return { error: 'question is required' };
+  console.log(
+    `[askCanon] start user=${args.userId.slice(0, 8)} ws=${args.workspace} q="${q.slice(0, 80)}"`,
+  );
+  if (!q) {
+    console.warn('[askCanon] reject: empty question');
+    return { error: 'question is required' };
+  }
 
+  const tRetrieve = Date.now();
   const candidates = await retrieve(args.userId, args.workspace, q);
+  console.log(
+    `[askCanon] retrieve user=${args.userId.slice(0, 8)} q="${q.slice(0, 60)}" ` +
+      `→ ${candidates.length} candidates in ${Date.now() - tRetrieve}ms`,
+  );
   if (candidates.length === 0) {
     return {
       answer:
@@ -171,7 +182,9 @@ export async function askCanon(args: {
   // stretch past 60s, which would silently leave the UI spinner armed
   // forever. Promise.race surfaces a deterministic error the UI can render.
   const timeoutMs = 25_000;
+  const tGemini = Date.now();
   let parsed: { answer: string; citedFactIds: string[]; confidence: 'high' | 'medium' | 'low' };
+  let rawText = '';
   try {
     const res = await Promise.race([
       ai.models.generateContent({
@@ -192,9 +205,27 @@ export async function askCanon(args: {
         ),
       ),
     ]);
-    parsed = JSON.parse(res.text ?? '');
+    rawText = res.text ?? '';
+    console.log(
+      `[askCanon] gemini OK in ${Date.now() - tGemini}ms · response_len=${rawText.length}`,
+    );
+    parsed = JSON.parse(rawText);
   } catch (e) {
-    return { error: (e as Error).message || 'Gemini call failed' };
+    const err = e as Error;
+    // Full stack to server logs so railway logs is actionable; safe error
+    // string back to the client (no Vertex internals leaked).
+    console.error(
+      `[askCanon] gemini FAIL after ${Date.now() - tGemini}ms · ` +
+        `q="${q.slice(0, 80)}" · err=${err.name}: ${err.message}`,
+    );
+    if (err.stack) console.error(err.stack);
+    if (rawText) console.error(`[askCanon] raw response that failed to parse: ${rawText.slice(0, 500)}`);
+    return {
+      error:
+        err.message?.includes('timeout')
+          ? err.message
+          : `Gemini call failed: ${err.message || 'unknown'} — check server logs`,
+    };
   }
 
   // Filter cited ids against retrieved set so the UI never renders a link
@@ -204,6 +235,18 @@ export async function askCanon(args: {
     .filter((id) => validIds.has(id))
     .map((id) => candidates.find((c) => c.factId === id)!)
     .filter(Boolean);
+
+  const droppedCount = parsed.citedFactIds.length - goodCitations.length;
+  if (droppedCount > 0) {
+    console.warn(
+      `[askCanon] dropped ${droppedCount} hallucinated factIds from response · ` +
+        `kept ${goodCitations.length}`,
+    );
+  }
+  console.log(
+    `[askCanon] DONE q="${q.slice(0, 60)}" · cited=${goodCitations.length} · ` +
+      `conf=${parsed.confidence} · total=${Date.now() - t0}ms`,
+  );
 
   return {
     answer: parsed.answer,
