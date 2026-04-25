@@ -46,9 +46,14 @@ export interface QontextLimits {
   maxPosts?: number;
   maxItTickets?: number;
   maxPolicies?: number;
+  /** Top-N products (by sales frequency) used as the hero set for
+   *  cross-source corroboration: catalog + sales + invoices. */
+  maxHeroProducts?: number;
+  /** Cap of customer-order PDFs to parse for invoice line items. */
+  maxInvoices?: number;
 }
 
-/** Default sample sizes — tuned to land ~1500-2000 facts in the Inazuma workspace. */
+/** Default sample sizes — tuned to land ~5000 facts in the Inazuma workspace. */
 const DEFAULT_LIMITS: Required<QontextLimits> = {
   maxClients: 400,
   maxVendors: 400,
@@ -59,6 +64,8 @@ const DEFAULT_LIMITS: Required<QontextLimits> = {
   maxPosts: 30,
   maxItTickets: 40,
   maxPolicies: 8,
+  maxHeroProducts: 100,
+  maxInvoices: 30,
 };
 
 /**
@@ -98,6 +105,9 @@ export interface QontextIngestResult {
     posts: number;
     itTickets: number;
     policies: number;
+    products: number;
+    sales: number;
+    invoices: number;
   };
 }
 
@@ -122,7 +132,36 @@ export async function loadQontextSample(
     posts: 0,
     itTickets: 0,
     policies: 0,
+    products: 0,
+    sales: 0,
+    invoices: 0,
   };
+
+  // Pre-load sales to compute hero-product set (top-N by sales frequency).
+  // Hero products drive 3-source corroboration: products.json catalog +
+  // sales.json transactions + invoice PDFs. The same `product.actual_price`
+  // metric appears across all three so the conflict detector clusters them.
+  let heroProductIds: Set<string> = new Set();
+  let allSalesCached: SaleRecord[] = [];
+  let allProductsCached: ProductRecordExt[] = [];
+  try {
+    allSalesCached = await readJson<SaleRecord[]>(
+      'Customer_Relation_Management/sales.json',
+    );
+    const tally = new Map<string, number>();
+    for (const s of allSalesCached) {
+      if (!s.product_id) continue;
+      tally.set(s.product_id, (tally.get(s.product_id) ?? 0) + 1);
+    }
+    heroProductIds = new Set(
+      [...tally.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, lim.maxHeroProducts)
+        .map(([id]) => id),
+    );
+  } catch (e) {
+    console.warn('[qontext] sales.json prescan skipped:', (e as Error).message);
+  }
 
   // 1. Clients — B2B engagements (richest entity records).
   // Strategy: ALWAYS include the records whose business_name appears more
@@ -278,6 +317,58 @@ export async function loadQontextSample(
     console.warn('[qontext] policies skipped:', (e as Error).message);
   }
 
+  // 9. Products catalog — emit fact-rich product records for the hero set.
+  // Each hero product produces ~5 facts (name, category, actual/discounted
+  // price, rating). Catalog facts cluster with sales + invoice price facts
+  // on `product.actual_price` for cross-source corroboration / conflict.
+  try {
+    if (allProductsCached.length === 0) {
+      allProductsCached = await readJson<ProductRecordExt[]>(
+        'Customer_Relation_Management/products.json',
+      );
+    }
+    const heroProducts = allProductsCached.filter((p) =>
+      heroProductIds.has(p.product_id),
+    );
+    for (const p of heroProducts) {
+      directDrafts.push(...productToDrafts(p));
+    }
+    counts.products = heroProducts.length;
+  } catch (e) {
+    console.warn('[qontext] products.json skipped:', (e as Error).message);
+  }
+
+  // 10. Sales records — only for hero products. Each sale emits 1 price
+  // corroboration fact (entity = product, metric = actual_price). Multiple
+  // sales at the same price form natural corroboration clusters; outliers
+  // surface as conflicts. Hero filter caps volume to ~10-30 facts/product.
+  try {
+    const heroSales = allSalesCached.filter((s) => heroProductIds.has(s.product_id));
+    for (const s of heroSales) {
+      directDrafts.push(...saleToDrafts(s));
+    }
+    counts.sales = heroSales.length;
+  } catch (e) {
+    console.warn('[qontext] sales.json skipped:', (e as Error).message);
+  }
+
+  // 11. Customer-order PDFs — invoices have a clean tabular shape (Customer
+  // header + product line items). Per-line-item we emit one product price
+  // fact, joining the same `product.actual_price` cluster as catalog +
+  // sales. This is the third corroborating source per hero product.
+  try {
+    const invoiceDrafts = await loadInvoiceDrafts(lim.maxInvoices);
+    for (const d of invoiceDrafts) directDrafts.push(d);
+    // Count distinct invoice files via sourceRef prefix.
+    const seenInvoices = new Set<string>();
+    for (const d of invoiceDrafts) {
+      seenInvoices.add(d.sourceRef.split('#')[0]);
+    }
+    counts.invoices = seenInvoices.size;
+  } catch (e) {
+    console.warn('[qontext] invoices skipped:', (e as Error).message);
+  }
+
   return { directDrafts, pipelineChunks, counts };
 }
 
@@ -361,6 +452,26 @@ export interface ItTicketRecord {
   emp_id?: string;
   Issue?: string;
   Resolution?: string;
+}
+
+export interface ProductRecordExt {
+  product_id: string;
+  product_name?: string;
+  category?: string;
+  discounted_price?: string;
+  actual_price?: string;
+  rating?: string;
+  about_product?: string;
+}
+
+export interface SaleRecord {
+  product_id: string;
+  discounted_price?: string;
+  actual_price?: string;
+  discount_percentage?: string;
+  customer_id?: string;
+  Date_of_Purchase?: string;
+  sales_record_id: number;
 }
 
 /* -------------------------------------------------------------------------- *
@@ -568,6 +679,204 @@ export function itTicketToDrafts(t: ItTicketRecord): FactDraft[] {
     });
   }
   return drafts;
+}
+
+export function productToDrafts(p: ProductRecordExt): FactDraft[] {
+  if (!p.product_id) return [];
+  const slug = `product_${slugify(p.product_id)}`;
+  const ref = `qontext:product:${p.product_id}`;
+  // Catalog has no per-record date; use a deterministic anchor so re-ingests
+  // produce the same hash chain. The full Inazuma sample is anchored at the
+  // dataset's nominal "as-of" point — change once if you reload from a new
+  // Qontext snapshot.
+  const observed = '2024-01-01T00:00:00.000Z';
+  const drafts: FactDraft[] = [];
+
+  if (p.product_name) {
+    const name = p.product_name.replace(/\s+/g, ' ').trim();
+    drafts.push({
+      entity: slug,
+      claim: `Product ${p.product_id}: ${name.slice(0, 120)}.`,
+      metric: { key: 'name', value: name.slice(0, 80) },
+      sourceRef: ref,
+      sourceExcerpt: `product_id: ${p.product_id}, name: ${name.slice(0, 160)}`,
+      observedAt: observed,
+    });
+  }
+  if (p.category) {
+    const top = p.category.split('|')[0]?.replace(/[;,]+$/, '').trim() ?? p.category;
+    drafts.push({
+      entity: slug,
+      claim: `Product ${p.product_id} category: ${top}.`,
+      metric: { key: 'category', value: top.slice(0, 60) },
+      sourceRef: ref,
+      sourceExcerpt: `category: ${p.category.slice(0, 160)}`,
+      observedAt: observed,
+    });
+  }
+  if (p.actual_price) {
+    const norm = normalizeRupeePrice(p.actual_price);
+    drafts.push({
+      entity: slug,
+      claim: `Product ${p.product_id} catalog actual price: ${p.actual_price}.`,
+      metric: { key: 'actual_price', value: norm.value, unit: norm.unit },
+      sourceRef: ref,
+      sourceExcerpt: `catalog actual_price: ${p.actual_price}`,
+      observedAt: observed,
+    });
+  }
+  if (p.discounted_price) {
+    const norm = normalizeRupeePrice(p.discounted_price);
+    drafts.push({
+      entity: slug,
+      claim: `Product ${p.product_id} catalog discounted price: ${p.discounted_price}.`,
+      metric: { key: 'discounted_price', value: norm.value, unit: norm.unit },
+      sourceRef: ref,
+      sourceExcerpt: `catalog discounted_price: ${p.discounted_price}`,
+      observedAt: observed,
+    });
+  }
+  if (p.rating) {
+    drafts.push({
+      entity: slug,
+      claim: `Product ${p.product_id} catalog rating: ${p.rating}.`,
+      metric: { key: 'rating', value: p.rating },
+      sourceRef: ref,
+      sourceExcerpt: `rating: ${p.rating}`,
+      observedAt: observed,
+    });
+  }
+  return drafts;
+}
+
+export function saleToDrafts(s: SaleRecord): FactDraft[] {
+  // One sale → one corroborating product-price fact. Multiple sales at the
+  // same price form a corroboration cluster on `product.actual_price`;
+  // outliers surface as conflicts. Customer-purchase facts are intentionally
+  // NOT emitted here — they would either flood as N-way conflicts (one
+  // metric_key, many product values) or pollute with per-purchase keys.
+  if (!s.product_id || !s.actual_price) return [];
+  const productSlug = `product_${slugify(s.product_id)}`;
+  const ref = `qontext:sale:${s.sales_record_id}`;
+  const observed = parseDateOrNow(s.Date_of_Purchase);
+  const norm = normalizeRupeePrice(s.actual_price);
+  return [
+    {
+      entity: productSlug,
+      claim: `Sale of product ${s.product_id} at ${s.actual_price}${s.Date_of_Purchase ? ` on ${s.Date_of_Purchase}` : ''}.`,
+      metric: { key: 'actual_price', value: norm.value, unit: norm.unit },
+      sourceRef: ref,
+      sourceExcerpt: `sale_record_${s.sales_record_id}: customer ${s.customer_id ?? '?'}, actual_price ${s.actual_price}, date ${s.Date_of_Purchase ?? '?'}`,
+      observedAt: observed,
+    },
+  ];
+}
+
+/**
+ * Parse a customer-order PDF (invoice / purchase order / shipping order)
+ * and emit FactDrafts for each line item. Invoice format is fixed:
+ *   "Invoice for Customer ID: alfki"
+ *   "Customer Name: maria anders"
+ *   table rows: <product_id>  ...  ■<discounted>  ■<actual>  <category>
+ * The product IDs anchor each row; we tolerate text wrapping by extracting
+ * each row's prices from the same physical line as the product ID.
+ */
+async function loadInvoiceDrafts(max: number): Promise<FactDraft[]> {
+  if (max <= 0) return [];
+  const ordersDir = path.join(
+    DATA_ROOT,
+    'Customer_Relation_Management',
+    'Customer_orders',
+  );
+  const { readdir } = await import('node:fs/promises');
+  let entries: string[] = [];
+  try {
+    entries = await readdir(ordersDir);
+  } catch {
+    return [];
+  }
+  const pdfs = entries
+    .filter((f) => f.toLowerCase().endsWith('.pdf') && !f.startsWith('._'))
+    .sort();
+  const sampled = pickSample(pdfs, max);
+
+  const { PDFParse } = await import('pdf-parse');
+  const drafts: FactDraft[] = [];
+  for (const filename of sampled) {
+    try {
+      const buf = await readFile(path.join(ordersDir, filename));
+      const parser = new PDFParse({ data: new Uint8Array(buf) });
+      const result = await parser.getText();
+      const text = result.text ?? '';
+      drafts.push(...parseInvoiceText(filename, text));
+    } catch (e) {
+      console.warn(`[qontext] invoice ${filename} skipped:`, (e as Error).message);
+    }
+  }
+  return drafts;
+}
+
+function parseInvoiceText(filename: string, text: string): FactDraft[] {
+  // Filename anchors the customer ID: invoice_<id>.pdf, purchase_order_<id>.pdf,
+  // shipping_order_<id>.pdf. Falls back to header parse if filename doesn't match.
+  const fnameMatch = filename.match(/^(?:invoice|purchase_order|shipping_order)_([a-z0-9]+)\.pdf$/i);
+  const headerCustomer = fnameMatch?.[1] ?? text.match(/Customer ID:\s*([A-Za-z0-9_-]+)/i)?.[1] ?? null;
+  const docKind = filename.startsWith('invoice') ? 'invoice'
+    : filename.startsWith('purchase_order') ? 'purchase_order'
+    : filename.startsWith('shipping_order') ? 'shipping_order'
+    : 'order_doc';
+  const ref = `qontext:${docKind}:${headerCustomer ?? slugify(filename)}`;
+  // Anchor invoices on the dataset's nominal as-of point (the PDFs carry no
+  // explicit date). Same anchor as products.json for cross-source clustering.
+  const observed = '2024-01-01T00:00:00.000Z';
+
+  // Each line item: ANCHOR on a product id, then pull the next two
+  // currency-prefixed numbers on the same row as discounted + actual.
+  // The currency glyph is encoded inconsistently across the dataset:
+  //   - ■  raw bullet (some PDFs)
+  //   - ₹  proper rupee  (rare)
+  //   - n  pdf-parse loses the rupee font mapping → renders as Latin n
+  //         (the bulk of Customer_orders/*.pdf)
+  // Lookbehind ensures we don't match `n` mid-word.
+  const drafts: FactDraft[] = [];
+  const PRODUCT_ID_RE = /\b(B[A-Z0-9]{9,11})\b/g;
+  const PRICE_PAIR_RE = /(?:[■₹]|(?<![a-zA-Z])n)\s*(\d[\d,]*)\s+(?:[■₹]|(?<![a-zA-Z])n)\s*(\d[\d,]*)/;
+  let m: RegExpExecArray | null;
+  const seenAtSourceRef = new Set<string>();
+  while ((m = PRODUCT_ID_RE.exec(text)) !== null) {
+    const productId = m[1];
+    // Look forward up to 600 chars for the two prices on this row.
+    // 600 covers the multi-line product name + category wrap that sits
+    // between the product id and its price pair in pdf-parse output.
+    const window = text.slice(m.index, m.index + 600);
+    const priceMatch = window.match(PRICE_PAIR_RE);
+    if (!priceMatch) continue;
+    const discounted = priceMatch[1];
+    const actual = priceMatch[2];
+
+    const lineKey = `${ref}#${productId}`;
+    // PDFs sometimes repeat the same product id across pages; dedupe.
+    if (seenAtSourceRef.has(lineKey)) continue;
+    seenAtSourceRef.add(lineKey);
+
+    const productSlug = `product_${slugify(productId)}`;
+    const normActual = normalizeRupeePrice(`■${actual}`);
+    drafts.push({
+      entity: productSlug,
+      claim: `${docKind.replace('_', ' ')} for customer ${headerCustomer ?? '?'}: product ${productId} at ₹${actual}.`,
+      metric: { key: 'actual_price', value: normActual.value, unit: normActual.unit },
+      sourceRef: lineKey,
+      sourceExcerpt: `${docKind} ${filename} for ${headerCustomer ?? '?'}: ${productId}, discounted ₹${discounted}, actual ₹${actual}`,
+      observedAt: observed,
+    });
+  }
+  return drafts;
+}
+
+/** Strip ₹ / ■ + commas, return numeric string + 'INR' unit. */
+function normalizeRupeePrice(raw: string): { value: string; unit: string } {
+  const digits = raw.replace(/[₹■,\s]/g, '').trim();
+  return { value: digits || raw, unit: 'INR' };
 }
 
 /**
