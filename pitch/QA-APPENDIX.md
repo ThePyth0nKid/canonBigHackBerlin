@@ -10,13 +10,19 @@ One-page cheat sheet. Tight answers. Numbers from story-bible only.
 Der User pickt die Auflösung — und der Pick selbst ist ein **ResolutionEvent**, signed mit derselben Ed25519-Chain wie jeder FactEvent. Der Resolver, der Zeitpunkt, die ausgewählte Quelle: alles im signierten Audit-Log. Live im Code: `src/app/app/_actions/resolve.ts`.
 
 ### "Wie genau signiert ihr?"
-Ed25519, COSE_Sign1-Envelope, hash-chained: `eventHash = hash(parentHash || canonical(payload))`. Rust-Sidecar (`canon-signer`), 44/44 tests. Verify-Binary ist unabhängig — anderes Sprach-Target, anderer Codepath, no trust in Canon nötig.
+Ed25519, COSE_Sign1-Envelope, hash-chained: `eventHash = hash(parentHash || canonical(payload))`. Rust-Sidecar (`canon-signer`), 44/44 tests. Verify-Binary ist ein **separates** Programm (`canon-verify`), anderer Codepath, no trust in der Signer-Pipeline nötig.
+
+### "Wer kontrolliert den Signing-Key? Was wenn er leakt?"
+Heute: ephemeral Ed25519-Keypair pro Signer-Boot, persistiert für die Host-Lifetime in `/var/folders/...` (Mac-tmp). **Das ist by-design ein 36h-Build, kein Production-PKI.** Architektur ist HSM-ready: Signer ist stateless Sidecar, Key-Material wird beim Boot injiziert. Production-swap ist eine 30-Zeilen-Config-Änderung — der event-log-shape ist das wertvolle, der Key-Custody-Layer drüber ist ein Tausch, kein Rewrite. Compare to Vector-DB: nichts da reinzu-tauschen.
 
 ### "Können Agents das selbst verifizieren?"
-Ja. `canon-verify-wasm`, Pubkey gepinnt, offline. Agent ruft `canon.cite(factId)` → bekommt COSE-Envelope → verifiziert lokal. Kein Server-Round-Trip nötig für Trust.
+Ja. Live: `/api/verify` spawnt das `canon-verify`-Binary server-side, Roundtrip ~12ms. Architektur-target: WASM-Build des gleichen Crate für reine Browser-Side-Verification (Pubkey gepinnt, offline). Quelle der Verifikation ist die canon-verify Codebasis, **nicht** der canon-signer — separater Codepath, separates Sprach-Target.
 
 ### "Was wenn die Pioneer-Extraction halluziniert?"
-Genau dafür Layer 2. Gemini 2M-context liest die volle Channel-/Inbox-/PDF-History und audited den Pioneer-Output gegen den weiteren Kontext. Widerspricht der Fact dem Kontext → er wird `PendingFact`, nicht signed. Bleibt der Konflikt: Conflict-UI, User-Pick, signed.
+Erstens: Pioneer ist **span-extractor** (GLiNER-2), kein Generator — jeder Output ist verbatim aus dem Source-Text. Halluzination im klassischen Sinne ist by construction nicht möglich. Zweitens: Layer 2 (Gemini 2M-context) liest die volle Channel-/Inbox-/PDF-History und audited den Pioneer-Output. Widerspruch im Kontext → Fact bekommt `notes='audit:contradiction:...'`, UI zeigt `audit·flag` Badge. Audit-Errors **fail closed** — Gemini-Blip = `audit_unavailable` Tag, nicht silent confirmed.
+
+### "Pioneer fällt aus / wird teurer / pivoted. Plan?"
+Pioneer ist Layer 1 — Span-Extractor mit FactDraft-Schema-Output. Schnittstelle ist 50 Zeilen Code (`src/lib/canon/pioneer.ts`). Drop-in-Replacements heute: GLiNER-2 self-host (Apache-2.0), oder kleines tuned-LLM mit JSON-mode. Lock-in ist nicht Pioneer das Modell, sondern das FactDraft-Contract — das ist unsers.
 
 ### "Was wenn Aikido einen False Positive flagt?"
 RedactionEvent statt FactEvent — selbst signed. User kann override (auch das ein signed Event). Kein silent drop, kein silent sign.
@@ -58,19 +64,30 @@ Weil jede ernsthafte IDE und jeder Coding-Agent in 2026 MCP spricht: Claude Code
 ## Numbers / story (für Demo-Q&A)
 
 ### "Was sind die Zahlen?"
-Northwind Q1 MRR: **€127.000**, bestätigt durch Slack + Gmail + Board-Deck-PDF.
-Q1 Forecast (Feb): €150.000 — superseded.
-ACME: 50 seats, Renewal 2026-05-15, ACV €120.000 (50 × €2,400/Jahr). Frühere Schätzung 40 seats — superseded by recency.
-TechCo: 12 seats × €200/Mo = €2,400 MRR lost. Confirmed by 3 sources.
-Q2 weighted Pipeline: €444.000 ARR.
+Workspace-State (Stand letzter Sync): **~50 active signed FactEvents, 6 customer entities, 5 Korroborationen, 5 live Konflikte.**
+
+Pitch-Highlights:
+- Northwind Q1 MRR: **€127.000**, bestätigt durch Slack + Gmail (3 facts).
+- Q1 Forecast (Feb): €150.000 — corroborated von PDF + Slack, semantically superseded.
+- ACME: 50 seats, Renewal 2026-05-15, ACV €120.000 (50 × €2,400/Jahr). Frühere Schätzung 40 seats — live conflict für User-Pick-Demo.
+- TechCo: 12 seats × €200/Mo = €2,400 MRR lost. Confirmed by 3 sources.
+- Globex (annual, 25 seats), Initech (monthly, 18 seats), Soylent (12-vs-14 seat ambiguity) — Tier-2 customers in der Demo.
+- Q2 weighted Pipeline: €444.000 ARR.
 
 ### "Warum nur 3 Sources?"
 Demo-Fokus. Architektur ist Source-Adapter-basiert. Slack, Gmail, PDF heute live; GitHub, Notion, Linear sind Issues im Repo mit gleichem `FactDraft`-Schema.
 
 ### "36 Stunden — was ist tatsächlich broken?"
 1. OAuth-Flows sind happy-path only — Gmail 2FA-edge bricht.
-2. Reconciliation-UI handled binary conflicts, nicht 3-way.
-3. `canon.write` MCP-Tool ist Stub — Read-Tools sind alle live.
+2. `canon_write` MCP-Tool ist Stub (returnt explizit „v0.2 coming soon"). Lookup/search/cite/diff sind live.
+3. Signing-Key ist ephemeral-pro-Host (siehe oben), nicht HSM-backed. Architektur-ready, swap pending.
+4. Multi-Tenant-Federation ist im MCP-Tool-Naming angelegt (workspace-scoped), aber Single-User-DB im Demo.
+
+### "Wer im Team baut das?"
+Solo-built in 36 Stunden — Nelson Mehlis, prior Founder bei PatchParty (B2B-SaaS, exited). Founder-bildende Erfahrung mit signed-event-logs aus dem `empheral`-Projekt (Rust, Ed25519, COSE) — Canon nutzt dasselbe Signing-Substrate. Looking for: technical co-founder, GTM partner, design partners.
+
+### "Why now — warum diese Woche?"
+MCP shipped vor ~12 Monaten, ist jetzt in Claude Desktop, Cursor, Windsurf, Zed default. Agent-population wächst gerade durch die Schwelle, an der „mein Agent halluziniert" zu „mein Agent macht teure Aktionen auf falschen Facts" wird. Vor MCP gab es keine Distribution für signed-fact-source. Nach MCP gibt es eine, und sie ist 12 Monate alt — wir sind am Anfang der Adoptions-Kurve, nicht am Ende.
 
 ---
 
