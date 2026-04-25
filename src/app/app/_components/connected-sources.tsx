@@ -70,9 +70,10 @@ function brandFor(kind: string): BrandStyle {
 
 export function ConnectedSources({ sources }: { sources: SourceStatus[] }) {
   const [expanded, setExpanded] = useState(false);
-  const live = sources.filter((s) => s.kind !== 'qontext');
-  const totalActive = sources.reduce((n, s) => n + s.factCount, 0);
-
+  // Count what actually contributes facts to the ledger — drops noise rows
+  // like "configured but never synced" without inventing an internal "live"
+  // classification the user has no context for.
+  const contributing = sources.filter((s) => s.factCount > 0);
   return (
     <div className="rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
       <button
@@ -82,7 +83,7 @@ export function ConnectedSources({ sources }: { sources: SourceStatus[] }) {
       >
         <div className="flex items-center gap-3">
           <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">
-            connected sources
+            {contributing.length} source{contributing.length === 1 ? '' : 's'} feeding this ledger
           </span>
           <div className="flex items-center gap-1.5">
             {sources.map((s) => (
@@ -91,7 +92,7 @@ export function ConnectedSources({ sources }: { sources: SourceStatus[] }) {
           </div>
         </div>
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-          {totalActive.toLocaleString()} facts · {live.filter((s) => s.ready).length} of {live.length} live · {expanded ? '−' : '+'}
+          {expanded ? 'hide details −' : 'show details +'}
         </span>
       </button>
 
