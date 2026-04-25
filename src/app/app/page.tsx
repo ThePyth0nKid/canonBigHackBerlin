@@ -112,6 +112,9 @@ function MetricRow({ entity, metric }: { entity: string; metric: MetricGroup }) 
     (f) => f.metricValue === metric.winnerValue,
   ) ?? metric.active[0];
   const competing = metric.active;
+  const auditFlagged = [...metric.active, ...metric.superseded].some((f) =>
+    (f.notes ?? '').startsWith('audit:'),
+  );
 
   return (
     <div className="flex flex-wrap items-start justify-between gap-4 p-5">
@@ -121,6 +124,14 @@ function MetricRow({ entity, metric }: { entity: string; metric: MetricGroup }) 
           {metric.corroborated && (
             <span className="rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-900 dark:border-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-200">
               ✓ {metric.confirmingSources.length} sources
+            </span>
+          )}
+          {auditFlagged && (
+            <span
+              title="Gemini audit flagged a contradiction in the source context"
+              className="rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-900 dark:border-sky-700 dark:bg-sky-900/20 dark:text-sky-200"
+            >
+              ⚠ audit
             </span>
           )}
           {metric.needsHumanResolve && (

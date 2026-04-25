@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from 'react';
 import type { FactRow } from '@/lib/canon/view';
+import { SourcePill } from './source-pill';
 import { resolveConflict } from '../_actions/resolve';
 
 interface Props {
@@ -10,12 +11,22 @@ interface Props {
   competing: FactRow[];
 }
 
+/**
+ * Conflict-resolution modal. Lays competing claims as a side-by-side grid
+ * (1 column on mobile) so the contradiction is obvious from the back of the
+ * pitch room. Picking a winner triggers resolveConflict, which spawns the
+ * canon-signer and persists a signed ResolutionEvent at the chain tip.
+ */
 export function ConflictResolve({ entity, metricKey, competing }: Props) {
   const [open, setOpen] = useState(false);
   const [pending, start] = useTransition();
   const [picked, setPicked] = useState<string | null>(null);
 
   if (competing.length < 2) return null;
+
+  // Cluster competing facts by metric value so multiple sources for the same
+  // value land in the same column. Latest cluster first.
+  const clusters = clusterByValue(competing);
 
   return (
     <>
@@ -32,20 +43,21 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
           onClick={() => setOpen(false)}
         >
           <div
-            className="w-full max-w-2xl rounded-2xl border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-800 dark:bg-zinc-950"
+            className="w-full max-w-3xl rounded-2xl border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-800 dark:bg-zinc-950"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-xs font-mono uppercase tracking-wide text-zinc-500">
+                <p className="font-mono text-xs uppercase tracking-wide text-zinc-500">
                   resolve conflict · {entity}.{metricKey}
                 </p>
                 <h2 className="mt-1 text-lg font-semibold">
-                  Two or more sources disagree.
+                  {clusters.length} competing claims · pick the source of truth.
                 </h2>
                 <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                  Pick the source of truth. Canon will sign your decision and
-                  retain the others as audit history.
+                  Your pick gets signed with the same Ed25519 key as the
+                  facts and chained on the audit log. Losing claims stay in
+                  history as <span className="font-mono text-xs">superseded</span>.
                 </p>
               </div>
               <button
@@ -57,54 +69,107 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
               </button>
             </div>
 
-            <ul className="mt-6 space-y-3">
-              {competing.map((f) => (
-                <li
-                  key={f.id}
-                  className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-base font-semibold">
-                        {f.metricValue}
-                        {f.metricUnit ? (
-                          <span className="ml-1 text-sm font-medium text-zinc-500">
-                            {f.metricUnit}
-                          </span>
-                        ) : null}
-                      </div>
-                      <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-                        “{f.sourceExcerpt ?? f.claim}”
-                      </p>
-                      <p className="mt-1 font-mono text-[10px] text-zinc-500">
-                        {f.sourceRef} · {f.observedAt?.toISOString().slice(0, 10) ?? '—'}
-                      </p>
+            <div
+              className={`mt-6 grid gap-4 ${
+                clusters.length === 2
+                  ? 'sm:grid-cols-2'
+                  : 'sm:grid-cols-2 md:grid-cols-3'
+              }`}
+            >
+              {clusters.map((c) => {
+                const head = c[0];
+                const sources = [...new Set(c.map((f) => sourceKindOf(f.sourceRef)))];
+                const latest = c.reduce<Date | null>((acc, f) => {
+                  if (!f.observedAt) return acc;
+                  return !acc || f.observedAt.getTime() > acc.getTime()
+                    ? f.observedAt
+                    : acc;
+                }, null);
+                return (
+                  <div
+                    key={head.id}
+                    className="flex flex-col rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900"
+                  >
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-3xl font-semibold tabular-nums">
+                        {head.metricValue ?? '—'}
+                      </span>
+                      {head.metricUnit && (
+                        <span className="text-sm text-zinc-500">{head.metricUnit}</span>
+                      )}
                     </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {sources.map((s) => (
+                        <SourcePill key={s} kind={s} />
+                      ))}
+                      <span className="font-mono text-[10px] text-zinc-500">
+                        · {c.length} fact{c.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    {latest && (
+                      <p className="mt-1 font-mono text-[10px] text-zinc-500">
+                        latest observed {latest.toISOString().slice(0, 10)}
+                      </p>
+                    )}
+                    <p className="mt-3 line-clamp-3 text-xs text-zinc-700 dark:text-zinc-300">
+                      “{head.sourceExcerpt ?? head.claim}”
+                    </p>
+                    <p className="mt-2 font-mono text-[10px] text-zinc-500 break-all">
+                      {head.sourceRef}
+                    </p>
                     <button
                       type="button"
                       disabled={pending}
                       onClick={() => {
-                        setPicked(f.id);
+                        setPicked(head.id);
                         start(async () => {
                           await resolveConflict({
                             entity,
                             metricKey,
-                            winnerFactId: f.id,
+                            winnerFactId: head.id,
                           });
                           setOpen(false);
                         });
                       }}
-                      className="rounded-full bg-zinc-950 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+                      className="mt-4 inline-flex h-9 items-center justify-center rounded-full bg-zinc-950 px-4 text-xs font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
                     >
-                      {pending && picked === f.id ? 'signing…' : 'pick as truth'}
+                      {pending && picked === head.id ? 'signing…' : 'pick as truth'}
                     </button>
                   </div>
-                </li>
-              ))}
-            </ul>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
     </>
   );
+}
+
+function clusterByValue(facts: FactRow[]): FactRow[][] {
+  const map = new Map<string, FactRow[]>();
+  for (const f of facts) {
+    const k = normalizeValue(f.metricValue ?? '');
+    if (!map.has(k)) map.set(k, []);
+    map.get(k)!.push(f);
+  }
+  return [...map.values()].sort((a, b) => {
+    const ta = a[0].observedAt?.getTime() ?? 0;
+    const tb = b[0].observedAt?.getTime() ?? 0;
+    if (tb !== ta) return tb - ta;
+    return b.length - a.length;
+  });
+}
+
+function normalizeValue(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[\s,€$£¥]/g, '')
+    .replace(/k\b/, '000')
+    .replace(/m\b/, '000000')
+    .trim();
+}
+
+function sourceKindOf(sourceRef: string): string {
+  return sourceRef.split(':', 1)[0];
 }
