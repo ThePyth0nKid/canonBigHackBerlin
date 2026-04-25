@@ -69,24 +69,36 @@ Weil jede ernsthafte IDE und jeder Coding-Agent in 2026 MCP spricht: Claude Code
 ## Numbers / story (für Demo-Q&A)
 
 ### "Was sind die Zahlen?"
-Workspace-State (Stand letzter Sync): **~50 active signed FactEvents, 6 customer entities, 5 Korroborationen, 5 live Konflikte.**
+Workspace-State (Stand letzter Sync): **2 active workspaces, ~400 active signed FactEvents, ~50 RedactionEvents, ~110 entities.**
 
-Pitch-Highlights:
-- Northwind Q1 MRR: **€127.000**, bestätigt durch Slack + Gmail (3 facts).
-- Q1 Forecast (Feb): €150.000 — corroborated von PDF + Slack, semantically superseded.
-- ACME: 50 seats, Renewal 2026-05-15, ACV €120.000 (50 × €2,400/Jahr). Frühere Schätzung 40 seats — live conflict für User-Pick-Demo.
-- TechCo: 12 seats × €200/Mo = €2,400 MRR lost. Confirmed by 3 sources.
-- Globex (annual, 25 seats), Initech (monthly, 18 seats), Soylent (12-vs-14 seat ambiguity) — Tier-2 customers in der Demo.
+| Workspace | Active facts | Redacted | Entities | Notable |
+|---|---|---|---|---|
+| `northwind` (demo) | ~50 | 8 | 6 | ACME 50-vs-40 seats, €127k MRR 3-source corroboration |
+| `inazuma` (Qontext dataset) | ~310 | 40 | 105 | 6 industry conflicts surfaced from clients.json/vendors.json directly |
+
+Northwind pitch numbers:
+- Q1 MRR: **€127.000**, bestätigt durch Slack + Gmail.
+- Q1 Forecast (Feb): €150.000 — corroborated, semantically superseded.
+- ACME: 50 seats, Renewal 2026-05-15, ACV €120k. Live conflict 50 vs 40.
+- TechCo: 12 seats × €200/Mo = €2,400 MRR lost. 3 sources.
 - Q2 weighted Pipeline: €444.000 ARR.
 
+Inazuma pitch numbers:
+- 400 B2B clients, 400 vendors, 1260 employees, 11.9k emails, 2.9k conversations, 10.8k internal Q&A in the dataset.
+- 6 dataset-native industry conflicts (Miller Group, Gonzalez Inc, Johnson Group; Huang LLC, Williams Group, Martin Ltd).
+- 40 PII redactions caught by Layer 3 in `contact_email` fields.
+
 ### "Warum nur 3 Sources?"
-Demo-Fokus. Architektur ist Source-Adapter-basiert. Slack, Gmail, PDF heute live; GitHub, Notion, Linear sind Issues im Repo mit gleichem `FactDraft`-Schema.
+Demo-Fokus. Architektur ist Source-Adapter-basiert. Slack, Gmail, PDF heute live für Northwind. **Plus Qontext-Adapter für Inazuma — strukturierte JSON-Records (clients/vendors/employees/posts) gehen direct-to-FactDraft, free-form (emails/conversations) durch Pioneer.** Insgesamt: 5 source-paths heute, GitHub/Notion/Linear sind 50-line additions.
+
+### "Wieso nicht eure Free-Form-Daten von Inazuma durch Pioneer? Pioneer extrahiert 0 drafts dort."
+Honest gap: Pioneer's domain-aware post-processor (440 lines in `pioneer.ts`) ist auf den Northwind-Cast getunt. Für Inazuma's Cast (1260 employees, 400 clients) hätten wir die Canonicalization-Map dynamisch aus den JSON-Records ziehen müssen — das ist 30 Minuten work die wir bewusst nicht in 36 Stunden investiert haben. **Strukturierte JSON-Records gehen sowieso direct-to-FactDraft (deterministisch, hash-stabil) — Pioneer ist für free-form Text. Inazumas Emails laufen durch, Pioneer findet aber keine bekannten Entitäten und droppt sie.** Architectural gap, nicht implementation gap; 30 lines fixen es post-submission.
 
 ### "36 Stunden — was ist tatsächlich broken?"
 1. OAuth-Flows sind happy-path only — Gmail 2FA-edge bricht.
-2. `canon_write` MCP-Tool ist Stub (returnt explizit „v0.2 coming soon"). Lookup/search/cite/diff sind live.
+2. `canon_write` MCP-Tool ist Stub (returnt explizit „v0.2 coming soon"). Lookup/search/cite/diff/external/workspaces sind live (6 Tools).
 3. Signing-Key ist ephemeral-pro-Host (siehe oben), nicht HSM-backed. Architektur-ready, swap pending.
-4. Multi-Tenant-Federation ist im MCP-Tool-Naming angelegt (workspace-scoped), aber Single-User-DB im Demo.
+4. Per-workspace Sync ist heute nur für Northwind verkabelt — Inazuma ingest läuft via CLI (`scripts/ingest-qontext.ts`), nicht über den UI-Sync-Button. Workspace-routing in `/api/sync` ist eine 30-Zeilen-Erweiterung, queued für v0.2.
 
 ### "Wer im Team baut das?"
 Solo-built in 36 Stunden — Nelson Mehlis, prior Founder bei PatchParty (B2B-SaaS, exited). Founder-bildende Erfahrung mit signed-event-logs aus dem `empheral`-Projekt (Rust, Ed25519, COSE) — Canon nutzt dasselbe Signing-Substrate. Looking for: technical co-founder, GTM partner, design partners.
@@ -99,7 +111,13 @@ MCP shipped vor ~12 Monaten, ist jetzt in Claude Desktop, Cursor, Windsurf, Zed 
 ## Track-fit (Qontext jurors)
 
 ### "Sie haben gesagt, ihr feedet Qontext. Beweis?"
-Canon-MCP-Server ist live, Claude-Desktop-Config liegt im Repo (`mcp/claude-desktop-config.example.json`). Selbe Config funktioniert in Qontexts Stack — wir hatten das mit Lorenz/Nikita am Booth abgesprochen. Ich gebe dir die Config heute Abend.
+Canon-MCP-Server ist live, Claude-Desktop-Config liegt im Repo (`mcp/claude-desktop-config.example.json`). Selbe Config funktioniert in Qontexts Stack — und weil wir euer Inazuma-Dataset bereits durch unsere Pipeline gepumpt haben, ist die Federation kein Versprechen sondern ein laufender Workspace: **`/app?ws=inazuma`** auf `canon.ultranova.io`. Mount canon-MCP in Qontext: 5 Minuten Config. Selbe Tools, neuer workspace param, eure Daten signed.
+
+### "Ihr habt unser Dataset benutzt — habt ihr nur unsere bekannten Duplikate gezeigt?"
+Honest answer: ja teilweise. Der Sample-Algorithm in `qontext.ts` priorisiert deterministisch jene `business_name`s die in clients.json mehrfach oder in clients UND vendors auftauchen — sechs Stück. Plus 30 weitere zufällig deterministisch gesampelte clients/vendors. **Wir haben die Konflikte nicht erfunden, wir haben sie zuverlässig in den Demo-Sample gezogen.** Ohne diese Force-Inclusion würde ein 40-zufälliger Sample mit ~7% Chance einen Konflikt enthalten — wir wollen aber dass er reproduzierbar drin ist, jeden Run, für die Demo. Same auto-resolution-policy fired auf den anderen ~250 sampled records — diese landen als active signed facts ohne Konflikt.
+
+### "Wie ist die hash-chain-Story bei zwei Workspaces?"
+Per-workspace Hash-Chain. Northwind und Inazuma sind unabhängige chains, jede anchort am eigenen genesis (parentHash leer). Das ist by-design, nicht Schwäche — selbe Logik wie multi-tenant Postgres-rows in zwei Schemas. Cross-workspace-Order ist keine property, die wir claimen. Innerhalb eines workspaces: jeder Fact zeigt mit parentHash auf den vorhergehenden, tamper-evident. Für Federation: zwei tenants, zwei chains, beide live in einem Canon.
 
 ### "Warum sollten wir euch und nicht eines der anderen 299 Teams?"
 Weil das hier kein Demo ist — das ist ein Layer. Drei Adapter shipped, zehn als Issues mit Tests. Trust-Pipeline aus vier Partnern, jeder architektur-formend, kein Sticker. Und: Canon's eigenes Repo ist self-Aikido-monitored, signed, beweisbar. Recursive trust ist nicht im Slide — es läuft.
