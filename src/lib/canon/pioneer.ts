@@ -53,7 +53,7 @@ interface PioneerResponse {
 /** The schema we hand Pioneer per-chunk. Fields are span-only (verbatim). */
 const FACT_SCHEMA: Record<string, FieldSpec[]> = {
   fact: [
-    'entity::str::verbatim company or customer name as written (Northwind, ACME, TechCo, Globex, Initech)',
+    'entity::str::verbatim company or customer name as written (Inazuma, Miller Group, Gonzalez Inc, Johnson Group, Huang LLC, Williams Group, Martin Ltd, Northwind, ACME, TechCo, Globex, Initech)',
     'metric_key::str::verbatim short metric label (MRR, ARR, seats, renewal, churn, growth, pipeline, ACV)',
     'metric_value::str::verbatim numeric or date value (e.g. 127,000 or 2026-05-15 or 50)',
     'metric_unit::str::verbatim unit (€, %, seats, /mo, /yr)',
@@ -67,6 +67,7 @@ const FACT_SCHEMA: Record<string, FieldSpec[]> = {
  * Anything outside this map is treated as noise and the draft is dropped.
  */
 const ENTITY_ALIASES: Record<string, string[]> = {
+  // Northwind demo cast (legacy — kept for the original Slack/Gmail/PDF demo).
   northwind: ['northwind', 'northwind software', 'northwind sw'],
   acme: ['acme', 'acme gmbh', 'acme corp'],
   techco: ['techco', 'tech co'],
@@ -74,6 +75,17 @@ const ENTITY_ALIASES: Record<string, string[]> = {
   initech: ['initech'],
   umbrella: ['umbrella'],
   soylent: ['soylent'],
+  // Inazuma demo cast — entities planted in clients/vendors with built-in
+  // industry conflicts + dual-role corroboration. Adding aliases here lets
+  // Pioneer recognise them in seeded Gmail/Slack messages so new facts
+  // cluster with the existing Inazuma ledger instead of being dropped.
+  inazuma: ['inazuma', 'inazuma.co'],
+  miller_group: ['miller group', 'miller_group'],
+  gonzalez_inc: ['gonzalez inc', 'gonzalez_inc', 'gonzalez'],
+  johnson_group: ['johnson group', 'johnson_group'],
+  huang_llc: ['huang llc', 'huang_llc'],
+  williams_group: ['williams group', 'williams_group'],
+  martin_ltd: ['martin ltd', 'martin_ltd'],
 };
 
 const ENTITY_REVERSE: Map<string, string> = new Map(

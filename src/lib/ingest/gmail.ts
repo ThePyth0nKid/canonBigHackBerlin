@@ -104,9 +104,9 @@ function messageToChunks(m: GmailMessage): Chunk[] {
     sourceRef: `gmail:${m.id}#p${idx}`,
     observedAt,
     sourceExcerpt: para.slice(0, 240),
-    // Inbox-context: emails without an explicit customer name (like the CFO's
-    // own Q1-locked email) are about Northwind itself.
-    defaultEntity: 'northwind',
+    // Inbox-context: emails without an explicit customer name belong to
+    // Inazuma itself (post-pivot — single-workspace world).
+    defaultEntity: 'inazuma',
   }));
 }
 

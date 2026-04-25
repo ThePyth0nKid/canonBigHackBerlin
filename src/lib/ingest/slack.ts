@@ -76,9 +76,9 @@ function messagesToChunks(channel: string, messages: SlackMessage[]): Chunk[] {
       sourceRef: `slack:${channel}:${m.ts}`,
       observedAt: tsToIso(m.ts),
       sourceExcerpt: text.slice(0, 240),
-      // Internal team channel — facts without an explicit customer name belong
-      // to the home org (Northwind in the Canon demo).
-      defaultEntity: 'northwind',
+      // Internal team channel — facts without an explicit customer name
+      // belong to Inazuma itself (post-pivot single-workspace world).
+      defaultEntity: 'inazuma',
     };
   });
 }
