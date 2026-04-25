@@ -95,9 +95,19 @@ export async function resolveUserConflicts(userId: string): Promise<{
 
     if (byValue.size === 1) continue; // pure corroboration → no resolution write
 
-    // Recency wins: pick the value cluster with the latest observedAt;
-    // tiebreak: largest cluster (more sources corroborate it).
+    // Resolution policy:
+    //   1. Strong corroboration trumps recency — when one cluster has at
+    //      least 2x as many facts AND ≥2 distinct sources, it wins regardless
+    //      of which value is newest. (Demo case: €127k confirmed by slack+
+    //      gmail+pdf shouldn't lose to a single hedging "€127-130k" line.)
+    //   2. Otherwise recency wins, with cluster size as tiebreaker.
     const ranked = [...values].sort((a, b) => {
+      const aSources = new Set(a.sources).size;
+      const bSources = new Set(b.sources).size;
+      const aDom = a.factIds.length >= 2 * b.factIds.length && aSources >= 2;
+      const bDom = b.factIds.length >= 2 * a.factIds.length && bSources >= 2;
+      if (aDom && !bDom) return -1;
+      if (bDom && !aDom) return 1;
       const ta = a.latestObservedAt?.getTime() ?? 0;
       const tb = b.latestObservedAt?.getTime() ?? 0;
       if (tb !== ta) return tb - ta;

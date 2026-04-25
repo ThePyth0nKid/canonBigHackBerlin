@@ -39,6 +39,18 @@ interface SyncSummary {
 }
 
 export async function POST(req: Request) {
+  try {
+    return await runSync(req);
+  } catch (e) {
+    console.error('[/api/sync] unhandled', e);
+    return NextResponse.json(
+      { error: 'sync_failed', message: (e as Error).message ?? String(e) },
+      { status: 500 },
+    );
+  }
+}
+
+async function runSync(req: Request): Promise<Response> {
   const t0 = Date.now();
   const session = await auth();
   const userId = (session?.user as { id?: string } | undefined)?.id;

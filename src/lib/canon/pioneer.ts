@@ -108,6 +108,11 @@ export interface Chunk {
    * even though "Northwind" isn't said in the message.
    */
   defaultEntity?: string;
+  /**
+   * Extra text consulted by post-processing for customer-detection only
+   * (not sent to Pioneer). Used to carry an email subject across sentences.
+   */
+  entityContext?: string;
 }
 
 /**
@@ -233,7 +238,10 @@ function postProcessDraft(draft: FactDraft | null, chunk: Chunk): FactDraft[] {
 
   const text = chunk.text;
   const lc = text.toLowerCase();
-  const customers = detectCustomersInText(lc);
+  // Include any entityContext (carried-forward subject/title) for customer
+  // detection, but NOT for value/seat regexes that should match the sentence.
+  const lcForEntity = (chunk.entityContext ?? '').toLowerCase() + ' ' + lc;
+  const customers = detectCustomersInText(lcForEntity);
 
   let metricKey = draft.metric?.key ?? null;
   let metricValue = draft.metric?.value ?? '';
@@ -361,14 +369,56 @@ function postProcessDraft(draft: FactDraft | null, chunk: Chunk): FactDraft[] {
     }
   }
 
+  // If we synthesized churn/seats additions, drop the original draft when it
+  // duplicates one of the new metric keys — Pioneer's churn span is usually
+  // the per-seat price not the total lost amount. Also drop when the original
+  // claimed northwind.mrr in a churn-context chunk: that's the lost-MRR amount
+  // mis-attributed to the home org.
+  const additionKinds = new Set(additions.map((a) => a.metric!.key));
+  if (additions.length > 0 && metricKey && additionKinds.has(metricKey)) {
+    return additions;
+  }
+  // Strong churn cues capture the churn euro amount as `additions`. The
+  // original draft's mrr/arr in such a chunk is the lost-MRR figure mis-routed
+  // to a house metric — drop it regardless of which entity Pioneer guessed,
+  // because entity correction would otherwise pull it back to northwind.
+  if (
+    additions.length > 0 &&
+    strongChurnCue &&
+    (metricKey === 'mrr' || metricKey === 'arr')
+  ) {
+    return additions;
+  }
+  // If Pioneer tagged a price as "seats", reroute to per_seat_price.
+  if (metricKey === 'seats' && /[€$]/.test(metricValue)) {
+    metricKey = 'per_seat_price';
+    metricUnit = metricUnit ?? '/yr';
+  }
+
   // === Whitelist gate ====================================================== //
   if (!metricKey || !ALLOWED_METRIC_KEYS.has(metricKey)) {
-    return [];
+    return additions;
   }
 
   // (b) Numeric metrics require a digit in value.
   if (NUMERIC_METRICS.has(metricKey) && !/\d/.test(metricValue)) {
-    return [];
+    return additions;
+  }
+
+  // mrr/arr/acv/forecast/pipeline/churn must look like money — at least 3
+  // digits, or contain € / , / k / m. Bare small ints like "23" are usually
+  // growth %; "1-2" is a count-of-things, not a euro value.
+  if (
+    (metricKey === 'mrr' ||
+      metricKey === 'arr' ||
+      metricKey === 'acv' ||
+      metricKey === 'forecast' ||
+      metricKey === 'pipeline' ||
+      metricKey === 'churn') &&
+    !/[€,km]/i.test(metricValue) &&
+    !/\d{3,}/.test(metricValue)
+  ) {
+    return additions;
   }
 
   // === Entity correction by metric kind ==================================== //
@@ -405,7 +455,7 @@ function postProcessDraft(draft: FactDraft | null, chunk: Chunk): FactDraft[] {
     return [];
   }
 
-  if (!metricValue) return [];
+  if (!metricValue) return additions;
 
   return [
     {
@@ -413,6 +463,7 @@ function postProcessDraft(draft: FactDraft | null, chunk: Chunk): FactDraft[] {
       entity,
       metric: { key: metricKey, value: metricValue, unit: metricUnit },
     },
+    ...additions,
   ];
 }
 
@@ -647,12 +698,18 @@ function splitChunkPerSentence(chunk: Chunk): Chunk[] {
 
   if (sentences.length <= 1) return [chunk];
 
+  // The first sentence often carries the email subject / slide title with the
+  // customer name in it. Carry that text forward as entityContext so post-
+  // processing can attribute later sentences to the right customer.
+  const header = sentences[0];
+
   return sentences.map((s, i) => ({
     text: s,
     sourceRef: `${chunk.sourceRef}#s${i}`,
     observedAt: chunk.observedAt,
     sourceExcerpt: s.slice(0, 240),
     defaultEntity: chunk.defaultEntity,
+    entityContext: i === 0 ? chunk.entityContext : `${header} ${chunk.entityContext ?? ''}`,
   }));
 }
 
