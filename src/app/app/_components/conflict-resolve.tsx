@@ -4,6 +4,8 @@ import { useState, useTransition } from 'react';
 import type { FactRow } from '@/lib/canon/view';
 import { SourcePill } from './source-pill';
 import { resolveConflict } from '../_actions/resolve';
+import { summarizeConflictAction } from '../_actions/summarize-conflict';
+import type { ConflictSummary } from '@/lib/canon/conflict-summary';
 
 interface Props {
   entity: string;
@@ -29,6 +31,12 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
   const [open, setOpen] = useState(false);
   const [pending, start] = useTransition();
   const [picked, setPicked] = useState<string | null>(null);
+
+  // Gemini summary state — separate from the resolve transition because
+  // we don't want a long Gemini call to grey out the action buttons.
+  const [summary, setSummary] = useState<ConflictSummary | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [summaryPending, startSummary] = useTransition();
 
   if (competing.length < 2) return null;
 
@@ -91,6 +99,108 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
               >
                 ×
               </button>
+            </div>
+
+            {/* Gemini summary block — between the header and the candidate
+                grid so it sits where the user looks first when deciding. */}
+            <div className="mt-5 rounded-xl border border-violet-300 bg-violet-50/60 p-4 dark:border-violet-700/50 dark:bg-violet-950/30">
+              {!summary && !summaryPending && !summaryError && (
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-violet-700 dark:text-violet-300">
+                      Gemini · 2.5-flash
+                    </p>
+                    <p className="mt-0.5 text-sm text-violet-900 dark:text-violet-100">
+                      Stuck? Get a 2-line analyst take on why these candidates
+                      disagree + a recommendation.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSummaryError(null);
+                      startSummary(async () => {
+                        const res = await summarizeConflictAction({
+                          entity,
+                          metricKey,
+                          factIds: allCandidateFactIds,
+                        });
+                        if ('error' in res) setSummaryError(res.error);
+                        else setSummary(res);
+                      });
+                    }}
+                    className="inline-flex h-9 shrink-0 items-center justify-center rounded-full border border-violet-700 bg-violet-100 px-4 text-xs font-semibold text-violet-900 transition-colors hover:bg-violet-200 dark:border-violet-500 dark:bg-violet-900/40 dark:text-violet-100 dark:hover:bg-violet-900/70"
+                  >
+                    Summarise with Gemini →
+                  </button>
+                </div>
+              )}
+
+              {summaryPending && (
+                <p className="font-mono text-[11px] text-violet-700 dark:text-violet-300">
+                  Gemini reading {allCandidateFactIds.length} candidates…
+                </p>
+              )}
+
+              {summaryError && (
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs text-rose-700 dark:text-rose-400">
+                    {summaryError}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSummaryError(null);
+                      setSummary(null);
+                    }}
+                    className="text-xs font-medium text-violet-700 underline-offset-2 hover:underline dark:text-violet-300"
+                  >
+                    retry
+                  </button>
+                </div>
+              )}
+
+              {summary && !summaryPending && (
+                <SummaryCard
+                  summary={summary}
+                  competing={competing}
+                  onPickWinner={(factId) => {
+                    setPicked(factId);
+                    start(async () => {
+                      try {
+                        await resolveConflict({
+                          mode: 'canonical',
+                          entity,
+                          metricKey,
+                          winnerFactId: factId,
+                        });
+                        setOpen(false);
+                      } catch (e) {
+                        setPicked(null);
+                        console.error('[conflict-resolve:summary-pick]', e);
+                      }
+                    });
+                  }}
+                  onMarkDistinct={() => {
+                    setPicked('__distinct__');
+                    start(async () => {
+                      try {
+                        await resolveConflict({
+                          mode: 'distinct',
+                          entity,
+                          metricKey,
+                          candidateFactIds: allCandidateFactIds,
+                        });
+                        setOpen(false);
+                      } catch (e) {
+                        setPicked(null);
+                        console.error('[conflict-resolve:summary-distinct]', e);
+                      }
+                    });
+                  }}
+                  pending={pending}
+                />
+              )}
             </div>
 
             <div
@@ -249,6 +359,89 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
         </div>
       )}
     </>
+  );
+}
+
+function SummaryCard({
+  summary,
+  competing,
+  onPickWinner,
+  onMarkDistinct,
+  pending,
+}: {
+  summary: ConflictSummary;
+  competing: FactRow[];
+  onPickWinner: (factId: string) => void;
+  onMarkDistinct: () => void;
+  pending: boolean;
+}) {
+  const winner = summary.winnerFactId
+    ? competing.find((f) => f.id === summary.winnerFactId)
+    : null;
+  const tone =
+    summary.recommendation === 'canonical'
+      ? { bg: 'bg-emerald-100 dark:bg-emerald-900/40', text: 'text-emerald-900 dark:text-emerald-200', border: 'border-emerald-400 dark:border-emerald-700' }
+      : summary.recommendation === 'distinct'
+        ? { bg: 'bg-sky-100 dark:bg-sky-900/40', text: 'text-sky-900 dark:text-sky-200', border: 'border-sky-400 dark:border-sky-700' }
+        : { bg: 'bg-zinc-100 dark:bg-zinc-800', text: 'text-zinc-700 dark:text-zinc-300', border: 'border-zinc-300 dark:border-zinc-700' };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-violet-700 dark:text-violet-300">
+          Gemini · 2.5-flash · {summary.latencyMs}ms
+        </p>
+        <span
+          className={`inline-flex items-center rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] ${tone.border} ${tone.bg} ${tone.text}`}
+        >
+          recommends · {summary.recommendation}
+        </span>
+      </div>
+      <p className="text-sm leading-relaxed text-violet-950 dark:text-violet-50">
+        {summary.summary}
+      </p>
+      {summary.reasoning && (
+        <p className="border-l-2 border-violet-300 pl-3 text-xs italic leading-snug text-violet-800 dark:border-violet-700/50 dark:text-violet-200/80">
+          {summary.reasoning}
+        </p>
+      )}
+      {winner && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-white/60 p-3 dark:bg-black/30">
+          <div className="min-w-0 flex-1">
+            <p className="font-mono text-[10px] uppercase tracking-wider text-violet-600 dark:text-violet-300">
+              Gemini's pick
+            </p>
+            <p className="mt-0.5 break-words text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              {winner.metricValue ?? '—'}
+              {winner.metricUnit ? ` ${winner.metricUnit}` : ''}
+            </p>
+            <p className="mt-0.5 break-all font-mono text-[10px] text-zinc-500">
+              factId: {winner.id}
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => onPickWinner(winner.id)}
+            className="inline-flex h-8 shrink-0 items-center justify-center rounded-full bg-zinc-950 px-3 text-[11px] font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+          >
+            {pending ? 'signing…' : 'Sign as canonical'}
+          </button>
+        </div>
+      )}
+      {summary.recommendation === 'distinct' && (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            disabled={pending}
+            onClick={onMarkDistinct}
+            className="inline-flex h-8 items-center justify-center rounded-full border border-sky-700 bg-sky-100 px-3 text-[11px] font-medium text-sky-900 transition-colors hover:bg-sky-200 disabled:opacity-60 dark:border-sky-500 dark:bg-sky-900/40 dark:text-sky-100 dark:hover:bg-sky-900/70"
+          >
+            {pending ? 'signing…' : 'Keep all · sign as distinct'}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
