@@ -1,0 +1,46 @@
+import { getRepoBanner, type AikidoBanner } from '@/lib/canon/aikido';
+
+/**
+ * Live repo-health banner — Layer 3's recursive trust beat:
+ * "Canon's own source code is Aikido-monitored, 0 issues."
+ * Read-only; refreshes on page reload (revalidatePath after sync).
+ */
+export async function AikidoRepoBanner() {
+  let banner: AikidoBanner | null = null;
+  try {
+    banner = await getRepoBanner();
+  } catch {
+    // Network blip → render a muted fallback rather than failing the page.
+    return null;
+  }
+
+  const ok = banner.totalIssues === 0;
+
+  return (
+    <div className="flex items-center gap-3 rounded-full border border-zinc-200 bg-white px-4 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-950">
+      <span
+        className={`inline-block h-2 w-2 rounded-full ${
+          ok ? 'bg-emerald-500' : 'bg-amber-500'
+        }`}
+        aria-hidden
+      />
+      <span className="font-mono text-zinc-500">aikido</span>
+      <span className="text-zinc-700 dark:text-zinc-300">
+        {banner.workspaceName} / <span className="font-medium">{banner.repoName}</span>
+      </span>
+      <span className="text-zinc-400">·</span>
+      <span className="text-zinc-700 dark:text-zinc-300">
+        {banner.totalIssues === 0
+          ? '0 issues'
+          : `${banner.totalIssues} issues (${banner.criticalIssues} critical)`}
+      </span>
+      <span className="text-zinc-400">·</span>
+      <span className="font-mono text-[10px] text-zinc-500">
+        {new Date(banner.fetchedAt).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        })}
+      </span>
+    </div>
+  );
+}
