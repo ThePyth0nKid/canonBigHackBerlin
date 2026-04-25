@@ -1,0 +1,65 @@
+Canon — third-party software notices
+====================================
+
+Canon's own source code is licensed MIT. See LICENSE.
+
+This project depends, via npm, on third-party software released under
+their own licenses. The notice below covers transitive dependencies
+flagged by automated license scanners (e.g. Aikido) that warrant
+explicit acknowledgement.
+
+LGPL-3.0-or-later packages
+--------------------------
+
+The following packages, pulled in transitively by Next.js 16 as optional
+runtime image-optimization helpers, are licensed under LGPL-3.0-or-later:
+
+  @img/sharp-*                   (binary distributions of libvips bindings)
+  @img/sharp-libvips-*           (libvips system bindings)
+
+Status in Canon:
+  - Not invoked at runtime. Canon does not use the Next.js Image component
+    or runtime image optimization (next.config.ts sets
+    `images.unoptimized: true`), so sharp's image pipeline is never called
+    by Canon application code.
+  - Optional dependency. Reproducible install without these packages:
+        npm install --omit=optional
+    The Canon application functions identically without sharp installed.
+  - Source code for these packages is publicly available at
+    https://github.com/lovell/sharp under the same license terms.
+
+For users distributing Canon (self-host, fork, or modify) under their own
+license, the LGPL-3.0-or-later applicability follows from how those
+binaries are linked in their distribution. Canon's MIT license applies
+only to source files authored in this repository.
+
+Apache-2.0 packages
+-------------------
+
+Numerous packages are licensed under Apache-2.0; their copyright notices
+and license texts are preserved inside the corresponding subdirectories
+of `node_modules/` after `npm install`. No source modifications by Canon
+authors.
+
+MIT, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD packages
+----------------------------------------------------
+
+These permissively-licensed packages comprise the bulk of the dependency
+tree and are used unchanged. Their license texts are preserved in
+`node_modules/`.
+
+Audited by
+----------
+
+Aikido (workspace ThePyth0nKid). Tracked repo: canonBigHackBerlin.
+Last review: 2026-04-25.
+
+Compliance statement
+--------------------
+
+Canon is shipped as source under MIT. Transitive dependencies retain their
+respective licenses. No license obligations of upstream packages are
+intentionally violated; downstream redistributors are responsible for
+their own compliance posture.
+
+Contact: nelson.mehlis@igoultra.de

@@ -7,3 +7,6 @@ src/generated/
 tsconfig.tsbuildinfo
 *.log
 .DS_Store
+
+# Private learning / NotebookLM source material — never publish
+docs-private/

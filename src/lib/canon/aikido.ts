@@ -52,14 +52,43 @@ interface IssueResp {
   status?: string;
   type?: string;
   repository_id?: number;
+  code_repo_id?: number;
+  code_repo_name?: string;
+  rule?: string | null;
+  rule_id?: string | null;
+  affected_file?: string;
+  affected_package?: string;
+  cve_id?: string;
+  cwe_classes?: string[];
+}
+
+export interface AikidoIssueSummary {
+  id: number | string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info' | 'unknown';
+  status: 'open' | 'ignored' | 'closed' | 'unknown';
+  type: string;
+  rule: string | null;
+  affectedFile: string | null;
+  affectedPackage: string | null;
+  cveId: string | null;
 }
 
 export interface AikidoBanner {
   workspaceName: string;
   repoName: string;
   repoActive: boolean;
+  /** All issues assigned to this repo (open + ignored + closed). */
   totalIssues: number;
-  criticalIssues: number;
+  openCritical: number;
+  openHigh: number;
+  openMedium: number;
+  openLow: number;
+  ignored: number;
+  closed: number;
+  /** Categorized counts for the banner's mini-chart. */
+  byType: Record<string, number>;
+  /** Up to 5 most-severe open issues for tooltip / drill-down. */
+  topOpen: AikidoIssueSummary[];
   fetchedAt: string;
 }
 
@@ -139,7 +168,7 @@ export async function getOpenIssues(): Promise<IssueResp[]> {
   return aikidoGet<IssueResp[]>('/api/public/v1/issues/export');
 }
 
-/** One-call repo-health summary for the /app banner. */
+/** One-call repo-health summary for the /app banner — full triage shape. */
 export async function getRepoBanner(opts?: {
   repoName?: string;
 }): Promise<AikidoBanner> {
@@ -151,17 +180,70 @@ export async function getRepoBanner(opts?: {
   ]);
   const repo = repos.find((r) => r.name === target);
   const repoIssues = repo
-    ? issues.filter((i) => i.repository_id === repo.id)
+    ? issues.filter(
+        (i) => i.code_repo_id === repo.id || i.repository_id === repo.id,
+      )
     : issues;
-  const critical = repoIssues.filter(
-    (i) => (i.severity ?? '').toLowerCase() === 'critical',
-  ).length;
+
+  let openCritical = 0;
+  let openHigh = 0;
+  let openMedium = 0;
+  let openLow = 0;
+  let ignored = 0;
+  let closed = 0;
+  const byType: Record<string, number> = {};
+
+  for (const i of repoIssues) {
+    const sev = (i.severity ?? '').toLowerCase();
+    const st = (i.status ?? '').toLowerCase();
+    const ty = i.type ?? 'unknown';
+    byType[ty] = (byType[ty] ?? 0) + 1;
+    if (st === 'ignored') ignored++;
+    else if (st === 'closed') closed++;
+    else if (st === 'open') {
+      if (sev === 'critical') openCritical++;
+      else if (sev === 'high') openHigh++;
+      else if (sev === 'medium') openMedium++;
+      else openLow++;
+    }
+  }
+
+  const topOpen: AikidoIssueSummary[] = repoIssues
+    .filter((i) => (i.status ?? '').toLowerCase() === 'open')
+    .sort((a, b) => (b.severity_score ?? 0) - (a.severity_score ?? 0))
+    .slice(0, 5)
+    .map((i) => ({
+      id: i.id ?? '?',
+      severity: normalizeSeverity(i.severity),
+      status: 'open',
+      type: i.type ?? 'unknown',
+      rule: i.rule ?? null,
+      affectedFile: i.affected_file ?? null,
+      affectedPackage: i.affected_package ?? null,
+      cveId: i.cve_id ?? null,
+    }));
+
   return {
     workspaceName: ws.name,
     repoName: repo?.name ?? target,
     repoActive: repo?.active ?? false,
     totalIssues: repoIssues.length,
-    criticalIssues: critical,
+    openCritical,
+    openHigh,
+    openMedium,
+    openLow,
+    ignored,
+    closed,
+    byType,
+    topOpen,
     fetchedAt: new Date().toISOString(),
   };
+}
+
+function normalizeSeverity(s: string | undefined): AikidoIssueSummary['severity'] {
+  const v = (s ?? '').toLowerCase();
+  if (v === 'critical' || v === 'high' || v === 'medium' || v === 'low' || v === 'info') {
+    return v;
+  }
+  return 'unknown';
 }

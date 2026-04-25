@@ -3,9 +3,14 @@
  * hands off to Pioneer for entity+metric extraction.
  *
  * Uses pdf-parse v2 (PDFParse class API). Each page becomes one chunk.
+ *
+ * Path-traversal hardening (Aikido AIK_ts_generic_path_traversal, CWE-23):
+ * `pdfPath` is constrained to files under the project's `demo/` directory.
+ * `readFile` only sees absolute paths whose realpath sits inside the allowed
+ * root, so callers that take untrusted input cannot cause file-disclosure.
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { FactDraft } from '../canon/types';
 import { extractFactsFromChunks, type Chunk } from '../canon/pioneer';
@@ -16,13 +21,34 @@ export interface PdfIngestResult {
   drafts: FactDraft[];
 }
 
-const DEFAULT_PDF = path.resolve(process.cwd(), 'demo/q1-board-deck.pdf');
+const DEMO_ROOT = path.resolve(process.cwd(), 'demo');
+const DEFAULT_PDF = path.resolve(DEMO_ROOT, 'q1-board-deck.pdf');
+
+async function safeResolveInsideDemo(input: string): Promise<string> {
+  const abs = path.isAbsolute(input) ? input : path.resolve(DEMO_ROOT, input);
+  // Realpath both sides — symlinks must not escape the allowed root either.
+  let real: string;
+  try {
+    real = await realpath(abs);
+  } catch {
+    throw new Error(`pdfPath does not exist: ${path.basename(abs)}`);
+  }
+  const root = await realpath(DEMO_ROOT);
+  if (real !== root && !real.startsWith(root + path.sep)) {
+    throw new Error('pdfPath must resolve inside the demo/ directory');
+  }
+  if (!real.toLowerCase().endsWith('.pdf')) {
+    throw new Error('pdfPath must point to a .pdf file');
+  }
+  return real;
+}
 
 export async function ingestPdf(opts?: {
   pdfPath?: string;
   observedAt?: string;
 }): Promise<PdfIngestResult> {
-  const pdfPath = opts?.pdfPath ?? DEFAULT_PDF;
+  const requested = opts?.pdfPath ?? DEFAULT_PDF;
+  const pdfPath = await safeResolveInsideDemo(requested);
   const filename = path.basename(pdfPath);
   const buf = await readFile(pdfPath);
 

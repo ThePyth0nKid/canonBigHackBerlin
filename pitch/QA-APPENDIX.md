@@ -27,6 +27,11 @@ Pioneer ist Layer 1 — Span-Extractor mit FactDraft-Schema-Output. Schnittstell
 ### "Was wenn Aikido einen False Positive flagt?"
 RedactionEvent statt FactEvent — selbst signed. User kann override (auch das ein signed Event). Kein silent drop, kein silent sign.
 
+### "Aikido auf eurem eigenen Repo — was hat es gefunden?"
+Drei Findings, alle triaged: (1) **HIGH SAST path-traversal** in `src/lib/ingest/pdf.ts:27` — Aikido fand eine readFile-mit-User-Input-Stelle. Wir haben heute Nachmittag eine `safeResolveInsideDemo`-Whitelist eingebaut (CWE-23 mitigated, realpath plus root-prefix-check). (2) **LOW SAST NoSQL-injection-Pattern** in `src/app/app/_actions/resolve.ts` — Prisma escapes the inputs, Aikido auto-ignored. (3) **LOW SCA postcss CVE-2026-41305** — devDep, auto-ignored.
+
+Das hier ist nicht „0 issues" als Marketing-Claim. **Drei gefunden, drei triaged, der HIGH ist gefixt.** Recursive trust working as designed.
+
 ---
 
 ## Positioning
