@@ -39,7 +39,7 @@ export interface ConflictResolution {
   winnerFactId: string;
   winnerValue: string;
   supersededFactIds: string[];
-  reason: 'recency' | 'corroboration';
+  reason: 'corroboration';
 }
 
 /**
@@ -95,35 +95,39 @@ export async function resolveUserConflicts(userId: string): Promise<{
 
     if (byValue.size === 1) continue; // pure corroboration → no resolution write
 
-    // Resolution policy:
-    //   1. Strong corroboration trumps recency — when one cluster has at
-    //      least 2x as many facts AND ≥2 distinct sources, it wins regardless
-    //      of which value is newest. (Demo case: €127k confirmed by slack+
-    //      gmail+pdf shouldn't lose to a single hedging "€127-130k" line.)
-    //   2. Otherwise recency wins, with cluster size as tiebreaker.
-    const ranked = [...values].sort((a, b) => {
-      const aSources = new Set(a.sources).size;
-      const bSources = new Set(b.sources).size;
-      const aDom = a.factIds.length >= 2 * b.factIds.length && aSources >= 2;
-      const bDom = b.factIds.length >= 2 * a.factIds.length && bSources >= 2;
-      if (aDom && !bDom) return -1;
-      if (bDom && !aDom) return 1;
+    // Resolution policy — auto-resolve ONLY when one cluster clearly dominates:
+    // ≥2x as many facts AND ≥2 distinct sources. Otherwise leave every cluster
+    // active and surface the conflict in /app so the user picks (and the pick
+    // gets signed). Pitch-relevant: ACME 50-vs-40 seats stays a live conflict.
+    const sortedByCount = [...values].sort((a, b) => {
       const ta = a.latestObservedAt?.getTime() ?? 0;
       const tb = b.latestObservedAt?.getTime() ?? 0;
-      if (tb !== ta) return tb - ta;
-      return b.factIds.length - a.factIds.length;
+      if (b.factIds.length !== a.factIds.length) {
+        return b.factIds.length - a.factIds.length;
+      }
+      return tb - ta;
     });
-    const winnerCluster = ranked[0];
-    const winnerFactId = winnerCluster.factIds[0];
-    const losers = ranked.slice(1).flatMap((v) => v.factIds);
+    const top = sortedByCount[0];
+    const next = sortedByCount[1];
+    const topSources = new Set(top.sources).size;
+    const dominates =
+      top.factIds.length >= 2 * next.factIds.length && topSources >= 2;
 
+    if (!dominates) {
+      // Real conflict — surfaces as ⚠ resolve in the UI, user picks, pipeline
+      // signs the choice. No DB writes here.
+      continue;
+    }
+
+    const winnerFactId = top.factIds[0];
+    const losers = sortedByCount.slice(1).flatMap((v) => v.factIds);
     if (losers.length === 0) continue;
 
     await prisma.factEvent.updateMany({
       where: { id: { in: losers } },
       data: {
         status: 'superseded',
-        notes: `superseded:recency:${winnerFactId}`,
+        notes: `superseded:corroboration:${winnerFactId}`,
       },
     });
 
@@ -131,9 +135,9 @@ export async function resolveUserConflicts(userId: string): Promise<{
       entity,
       metricKey,
       winnerFactId,
-      winnerValue: winnerCluster.displayValue,
+      winnerValue: top.displayValue,
       supersededFactIds: losers,
-      reason: 'recency',
+      reason: 'corroboration',
     });
   }
 
