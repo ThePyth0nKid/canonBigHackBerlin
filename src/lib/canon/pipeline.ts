@@ -30,6 +30,10 @@ export interface PipelineOutcome {
   notes?: string;
 }
 
+export type PipelineProgress =
+  | { phase: 'audit'; done: number; total: number }
+  | { phase: 'sign'; done: number; total: number; entity: string };
+
 export interface PipelineRunInput {
   userId: string;
   drafts: FactDraft[];
@@ -47,6 +51,12 @@ export interface PipelineRunInput {
   signer?: CanonSigner;
   /** Skip Gemini call (offline / quota-budget mode). Defaults to false. */
   skipAudit?: boolean;
+  /**
+   * Optional progress callback. Called per-fact during signing so the UI
+   * can show a streaming progress bar. Errors thrown by the callback are
+   * caught and ignored — never breaks the pipeline.
+   */
+  onProgress?: (event: PipelineProgress) => void;
 }
 
 export interface PipelineRunResult {
@@ -64,15 +74,26 @@ export async function runPipeline(input: PipelineRunInput): Promise<PipelineRunR
     contextLabel,
     skipAudit = false,
     workspace = 'northwind',
+    onProgress,
   } = input;
+  const emit = (event: PipelineProgress) => {
+    if (!onProgress) return;
+    try {
+      onProgress(event);
+    } catch {
+      // never let a UI callback break the pipeline.
+    }
+  };
   const ownsSigner = !input.signer;
   const signer = input.signer ?? new CanonSigner();
   signer.start();
 
   // Audit decisions are independent of scan outcomes; compute up-front in parallel.
+  emit({ phase: 'audit', done: 0, total: drafts.length });
   const verdicts: AuditVerdict[] = skipAudit
     ? drafts.map(() => ({ confirmed: true, confidence: 0 }))
     : await auditBatch(drafts, context, contextLabel);
+  emit({ phase: 'audit', done: drafts.length, total: drafts.length });
 
   // Hash-chain head: per-workspace tail eventHash, empty for genesis. Each
   // workspace gets its own chain so cross-workspace order doesn't mix.
@@ -157,6 +178,12 @@ export async function runPipeline(input: PipelineRunInput): Promise<PipelineRunR
       if (decision.status === 'active') active++;
       else if (decision.status === 'redacted') redacted++;
       else superseded++;
+      emit({
+        phase: 'sign',
+        done: i + 1,
+        total: drafts.length,
+        entity: draft.entity,
+      });
     }
   } finally {
     if (ownsSigner) await signer.close();

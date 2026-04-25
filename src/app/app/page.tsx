@@ -13,6 +13,7 @@ import { SourcePill } from './_components/source-pill';
 import { AikidoRepoBanner } from './_components/aikido-banner';
 import { SyncButton } from './_components/sync-button';
 import { WorkspaceSwitcher } from './_components/workspace-switcher';
+import { IngestQontextButton } from './_components/ingest-qontext-button';
 
 export const dynamic = 'force-dynamic';
 
@@ -135,12 +136,7 @@ export default async function WorkspacePage({
             {activeWorkspace === 'northwind' ? (
               <SyncButton />
             ) : (
-              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">
-                pre-loaded · re-ingest via{' '}
-                <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-900">
-                  scripts/ingest-qontext.ts
-                </code>
-              </span>
+              <IngestQontextButton />
             )}
           </div>
         </header>
