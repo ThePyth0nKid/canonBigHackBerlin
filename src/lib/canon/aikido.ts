@@ -247,3 +247,77 @@ function normalizeSeverity(s: string | undefined): AikidoIssueSummary['severity'
   }
   return 'unknown';
 }
+
+function normalizeStatus(s: string | undefined): AikidoIssueSummary['status'] {
+  const v = (s ?? '').toLowerCase();
+  if (v === 'open' || v === 'ignored' || v === 'closed') return v;
+  return 'unknown';
+}
+
+/* -------------------------------------------------------------------------- *
+ * Custom-rule attestation — surfaces, via Aikido's read-only public API,
+ * (a) that the canonBigHackBerlin repo is tracked by Aikido's hosted
+ * scanner and (b) any findings whose `rule_id` starts with `canon-`
+ * (our SAST namespace). On Pro-Trial workspaces, custom-rule upload is
+ * gated, so `canonRuleIds` will be empty — the function still returns
+ * the live workspace + repo as proof Aikido is watching the repo.
+ * -------------------------------------------------------------------------- */
+
+export interface CanonCustomRuleStatus {
+  workspaceName: string;
+  workspaceId: number;
+  repoName: string;
+  repoId: number | null;
+  /** Safe top-level deep-link (verified — `/repositories/code/<id>/issues` 404'd). */
+  repoListUrl: string;
+  /** Top-level Code Quality area in the Aikido sidebar. */
+  codeQualityUrl: string;
+  /** Issues whose rule_id starts with `canon-` (our SAST rule namespace). */
+  canonIssues: AikidoIssueSummary[];
+  /** Distinct rule_ids seen — proxy for "uploaded rules" if Pro is ever enabled. */
+  canonRuleIds: string[];
+  fetchedAt: string;
+}
+
+const CANON_RULE_PREFIX = 'canon-';
+
+export async function getCanonCustomRuleStatus(opts?: {
+  repoName?: string;
+}): Promise<CanonCustomRuleStatus> {
+  const target = opts?.repoName ?? TRACKED_REPO;
+  const [ws, repos, issues] = await Promise.all([
+    getWorkspace(),
+    getTrackedRepos(),
+    getOpenIssues(),
+  ]);
+  const repo = repos.find((r) => r.name === target);
+
+  const canonRaw = issues.filter((i) =>
+    (i.rule_id ?? '').toLowerCase().startsWith(CANON_RULE_PREFIX),
+  );
+  const canonIssues: AikidoIssueSummary[] = canonRaw.map((i) => ({
+    id: i.id ?? '?',
+    severity: normalizeSeverity(i.severity),
+    status: normalizeStatus(i.status),
+    type: i.type ?? 'sast',
+    rule: i.rule ?? i.rule_id ?? null,
+    affectedFile: i.affected_file ?? null,
+    affectedPackage: i.affected_package ?? null,
+    cveId: i.cve_id ?? null,
+  }));
+  const canonRuleIds = Array.from(
+    new Set(canonRaw.map((i) => i.rule_id ?? '').filter(Boolean)),
+  );
+
+  return {
+    workspaceName: ws.name,
+    workspaceId: ws.id,
+    repoName: repo?.name ?? target,
+    repoId: repo?.id ?? null,
+    repoListUrl: 'https://app.aikido.dev/repositories',
+    codeQualityUrl: 'https://app.aikido.dev/code-quality',
+    canonIssues,
+    canonRuleIds,
+    fetchedAt: new Date().toISOString(),
+  };
+}

@@ -1,0 +1,166 @@
+rules:
+  # ─────────────────────────────────────────────────────────────────────
+  # Rule 1 — direct dot-notation + bracket-notation + Reflect + cast.
+  # Cheapest, fastest pattern; catches the 95% case.
+  # ─────────────────────────────────────────────────────────────────────
+  - id: canon-direct-fact-event-write
+    languages: [typescript]
+    severity: ERROR
+    message: |
+      FactEvent rows must only be written via runPipeline() in
+      src/lib/canon/pipeline.ts (or, for resolutions, the equivalent
+      CanonSigner path in src/app/app/_actions/resolve.ts). Direct
+      prisma.factEvent.create / update / upsert / createMany without a
+      signed Ed25519 envelope + parent-hash chain breaks Canon's audit
+      trail. If you genuinely need a new write site, route the draft
+      through runPipeline() so the signature stays load-bearing.
+    metadata:
+      category: security
+      technology: [prisma, canon]
+      owner: canon-trust-gate
+      references:
+        - https://opengrep.dev/
+    pattern-either:
+      # Dot-notation writes — explicit method list so reads
+      # (findFirst / findMany / count / aggregate / groupBy) don't
+      # false-positive.
+      - pattern: $PRISMA.factEvent.create(...)
+      - pattern: $PRISMA.factEvent.createMany(...)
+      - pattern: $PRISMA.factEvent.createManyAndReturn(...)
+      - pattern: $PRISMA.factEvent.update(...)
+      - pattern: $PRISMA.factEvent.updateMany(...)
+      - pattern: $PRISMA.factEvent.updateManyAndReturn(...)
+      - pattern: $PRISMA.factEvent.upsert(...)
+      - pattern: $PRISMA.factEvent.delete(...)
+      - pattern: $PRISMA.factEvent.deleteMany(...)
+      # Obfuscated / dynamic accessor — match every method on the
+      # bracket-indexed delegate. Broad on purpose: any bracket-style
+      # access to the FactEvent delegate is suspicious in a codebase
+      # that otherwise uses dot-notation.
+      - pattern: $PRISMA["factEvent"].$METHOD(...)
+      # Reflection — `Reflect.get(prisma, 'factEvent').$METHOD(...)`
+      - pattern: Reflect.get($PRISMA, "factEvent").$METHOD(...)
+      # Cast-then-access (`(prisma as any).factEvent.create(...)`).
+      - pattern: ($PRISMA as $T).factEvent.$METHOD(...)
+    paths:
+      # Paths anchored to scan root (Semgrepignore v2 / Gitignore spec).
+      exclude:
+        # The bulk-ingest signed writer (Ed25519 + hash-chain).
+        - /src/lib/canon/pipeline.ts
+        # Reset-on-sync deleteMany; sourceRef-scoped, same caller as
+        # runPipeline.
+        - /src/app/api/sync/route.ts
+        # Manual conflict resolution. The create() call is signed via
+        # CanonSigner directly. The updateMany() only flips `status` /
+        # `notes`, neither of which are part of the signed CBOR payload
+        # (see src/lib/canon/sign-js.ts:7-14) — lifecycle metadata is
+        # mutable by design.
+        - /src/app/app/_actions/resolve.ts
+        # Corroboration sweep flips losers' `status` to `superseded`.
+        # Same payload-coverage argument as resolve.ts.
+        - /src/lib/canon/conflicts.ts
+        # Local dev/demo scripts (idempotent re-runs).
+        - /scripts/**
+        # Generated / vendored / test code.
+        - /src/generated/**
+        - /prisma/**
+        - /node_modules/**
+        - "**/*.test.ts"
+        - "**/*.test.tsx"
+        - "**/*.spec.ts"
+        - "**/*.spec.tsx"
+        - "**/__tests__/**"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Rule 2 — taint-mode catch for aliasing and destructuring.
+  # `const fe = prisma.factEvent; fe.create(...)`
+  # `const { factEvent } = prisma; factEvent.create(...)`
+  # ─────────────────────────────────────────────────────────────────────
+  - id: canon-fact-event-write-aliased
+    mode: taint
+    languages: [typescript]
+    severity: ERROR
+    message: |
+      Aliased FactEvent write detected (e.g. `const fe = prisma.factEvent`
+      followed by `fe.create(...)`, or destructuring `const { factEvent }
+      = prisma`). All FactEvent writes must go through runPipeline() or
+      the resolve.ts CanonSigner path so the Ed25519 signature stays
+      load-bearing.
+    metadata:
+      category: security
+      technology: [prisma, canon]
+      owner: canon-trust-gate
+    pattern-sources:
+      - pattern: $PRISMA.factEvent
+      - pattern: $PRISMA["factEvent"]
+      # Destructured binding taints the local `factEvent` var directly.
+      - patterns:
+          - pattern-either:
+              - pattern: const { factEvent } = $PRISMA
+              - pattern: const { factEvent, ... } = $PRISMA
+              - pattern: let { factEvent } = $PRISMA
+              - pattern: let { factEvent, ... } = $PRISMA
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $X.create(...)
+          - pattern: $X.createMany(...)
+          - pattern: $X.createManyAndReturn(...)
+          - pattern: $X.update(...)
+          - pattern: $X.updateMany(...)
+          - pattern: $X.updateManyAndReturn(...)
+          - pattern: $X.upsert(...)
+          - pattern: $X.delete(...)
+          - pattern: $X.deleteMany(...)
+    paths:
+      exclude:
+        - /src/lib/canon/pipeline.ts
+        - /src/app/api/sync/route.ts
+        - /src/app/app/_actions/resolve.ts
+        - /src/lib/canon/conflicts.ts
+        - /scripts/**
+        - /src/generated/**
+        - /prisma/**
+        - /node_modules/**
+        - "**/*.test.ts"
+        - "**/*.test.tsx"
+        - "**/*.spec.ts"
+        - "**/*.spec.tsx"
+        - "**/__tests__/**"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Rule 3 — raw-SQL writes targeting the FactEvent table.
+  # Catches `prisma.$executeRaw\`INSERT INTO "FactEvent" ...\`` and the
+  # `Prisma.sql` / `$queryRawUnsafe` variants.
+  # ─────────────────────────────────────────────────────────────────────
+  - id: canon-fact-event-raw-sql-write
+    languages: [typescript]
+    severity: ERROR
+    message: |
+      Raw-SQL write to the FactEvent table. The Prisma layer is the only
+      place where the Ed25519 signer is invoked; raw INSERT/UPDATE/DELETE
+      against FactEvent silently skips the audit trail. Use runPipeline()
+      or the resolve.ts CanonSigner path instead.
+    metadata:
+      category: security
+      technology: [prisma, canon, sql]
+      owner: canon-trust-gate
+    pattern-either:
+      # Tagged-template form: prisma.$executeRaw`INSERT INTO "FactEvent"...`
+      # Call-form: prisma.$executeRawUnsafe(`UPDATE "FactEvent"...`)
+      - pattern-regex: '\$(executeRaw|queryRaw)(Unsafe)?[\s\S]{0,200}?\b(INSERT|UPDATE|DELETE)\b[\s\S]{0,200}?\bFactEvent\b'
+      - pattern-regex: 'Prisma\.sql\s*`[\s\S]{0,200}?\b(INSERT|UPDATE|DELETE)\b[\s\S]{0,200}?\bFactEvent\b'
+    paths:
+      exclude:
+        - /src/lib/canon/pipeline.ts
+        - /src/app/api/sync/route.ts
+        - /src/app/app/_actions/resolve.ts
+        - /src/lib/canon/conflicts.ts
+        - /scripts/**
+        - /src/generated/**
+        - /prisma/**
+        - /node_modules/**
+        - "**/*.test.ts"
+        - "**/*.test.tsx"
+        - "**/*.spec.ts"
+        - "**/*.spec.tsx"
+        - "**/__tests__/**"

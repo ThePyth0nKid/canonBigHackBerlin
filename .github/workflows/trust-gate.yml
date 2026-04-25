@@ -1,0 +1,42 @@
+name: trust-gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  opengrep:
+    name: canon-trust-gate (Opengrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Pin Opengrep version. Bump deliberately — this engine is the
+      # ground truth for Canon's audit-trail enforcement.
+      OPENGREP_VERSION: "1.20.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert rule file is present
+        # A PR that deletes the gate file should fail loud, not silently.
+        run: |
+          test -f .semgrep/canon-trust-gate.yml \
+            || { echo '::error::Trust-gate rule file is missing; refusing to run.'; exit 2; }
+
+      - name: Install Opengrep
+        # Opengrep is the open-source Semgrep CE fork backed by a 10-org
+        # consortium of AppSec companies (Aikido, Arnica, Amplify, Endor,
+        # Jit, Kodem, Legit, Mobb, Orca, Phoenix). Same grammar as
+        # Semgrep, fully self-contained binary.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sL "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86" \
+            -o "$HOME/.local/bin/opengrep"
+          chmod +x "$HOME/.local/bin/opengrep"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Opengrep version
+        run: opengrep --version
+
+      - name: Run trust-gate rule
+        run: opengrep scan --config .semgrep/canon-trust-gate.yml src/ --error

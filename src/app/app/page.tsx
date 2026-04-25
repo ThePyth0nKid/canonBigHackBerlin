@@ -9,6 +9,7 @@ import {
   WORKSPACES,
 } from '@/lib/canon/view';
 import { AikidoRepoBanner } from './_components/aikido-banner';
+import { TrustGateBanner } from './_components/trust-gate-banner';
 import { SyncButton } from './_components/sync-button';
 import { FileDropIngest } from './_components/file-drop-ingest';
 import { EntitySection } from './_components/entity-section';
@@ -86,8 +87,9 @@ export default async function WorkspacePage() {
             <ConnectedSourcesRow userId={userId} workspace={activeWorkspace} />
           </Suspense>
 
-          <div className="border-t border-zinc-200 pt-4 dark:border-zinc-900">
+          <div className="space-y-2 border-t border-zinc-200 pt-4 dark:border-zinc-900">
             <AikidoRepoBanner />
+            <TrustGateBanner />
           </div>
 
           <FileDropIngest workspace="inazuma" />

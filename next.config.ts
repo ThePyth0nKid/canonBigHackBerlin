@@ -10,6 +10,14 @@ const nextConfig: NextConfig = {
   // optional package is still installed by Next.js but unused; see NOTICE
   // for the compliance statement.
   images: { unoptimized: true },
+  // The /app TrustGateBanner reads .semgrep/canon-trust-gate.yml at render
+  // time so the UI is data-bound to the actual repo artifact. The path is
+  // constructed dynamically (process.cwd() + path.join), so the file
+  // tracer can't auto-detect it — declare it explicitly so it survives
+  // the build and standalone bundling.
+  outputFileTracingIncludes: {
+    '/app': ['./.semgrep/canon-trust-gate.yml'],
+  },
 };
 
 export default nextConfig;

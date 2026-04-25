@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "prisma generate && next build",
     "start": "next start",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "trust-gate": "command -v opengrep >/dev/null 2>&1 || { echo 'opengrep not installed — install: curl -sL https://github.com/opengrep/opengrep/releases/download/v1.20.0/opengrep_osx_arm64 -o ~/.local/bin/opengrep && chmod +x ~/.local/bin/opengrep'; exit 127; }; opengrep scan --config .semgrep/canon-trust-gate.yml src/ --error"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.2",
