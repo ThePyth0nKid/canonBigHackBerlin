@@ -15,7 +15,13 @@
  */
 
 import { GoogleGenAI, Type } from '@google/genai';
-import { searchFacts, type SearchResult } from './search';
+import {
+  searchFacts,
+  detectIntent,
+  detectEntities,
+  type QueryIntent,
+  type SearchResult,
+} from './search';
 import { bootstrapVertexAuth } from './vertex-bootstrap';
 
 const MODEL = process.env.CANON_AUDIT_MODEL ?? 'gemini-2.5-flash';
@@ -54,6 +60,26 @@ export interface CanonCitation {
   clusterKind?: 'corroboration' | 'conflict';
 }
 
+export interface ConflictCandidate {
+  factId: string;
+  value: string | null;
+  unit: string | null;
+  sourceRef: string;
+  sourceExcerpt: string | null;
+  observedAt: Date | null;
+}
+
+export interface InlineConflict {
+  /** Entity slug (e.g. "miller_group"). */
+  entity: string;
+  /** Display name when ENTITY_DISPLAY map has one; else slug. */
+  entityDisplay: string;
+  /** Metric key in conflict (e.g. "industry"). */
+  metricKey: string;
+  /** All competing values, one card per. ≥2 by definition. */
+  candidates: ConflictCandidate[];
+}
+
 export interface CanonAnswer {
   /** Natural-language answer with inline [f_...] citations. */
   answer: string;
@@ -65,6 +91,11 @@ export interface CanonAnswer {
   retrievedCount: number;
   latencyMs: number;
   model: string;
+  /** Structured conflict surface — server-extracted from retrieval, NOT from
+   *  Gemini, so no hallucinated "fights". UI renders these as inline cards
+   *  with Pick / Distinct buttons that fire the existing resolveConflict
+   *  Server Action. Empty unless intent === 'conflict'. */
+  conflicts: InlineConflict[];
 }
 
 const SYSTEM_PROMPT = `You answer business questions using ONLY the signed Canon facts in the user message.
@@ -151,9 +182,10 @@ export async function askCanon(args: {
 
   const tRetrieve = Date.now();
   const candidates = await retrieve(args.userId, args.workspace, q);
+  const intent: QueryIntent = detectIntent(q);
   console.log(
     `[askCanon] retrieve user=${args.userId.slice(0, 8)} q="${q.slice(0, 60)}" ` +
-      `→ ${candidates.length} candidates in ${Date.now() - tRetrieve}ms`,
+      `intent=${intent} → ${candidates.length} candidates in ${Date.now() - tRetrieve}ms`,
   );
   if (candidates.length === 0) {
     return {
@@ -162,6 +194,7 @@ export async function askCanon(args: {
         'Try a more specific noun (entity name, metric like "actual_price", or a value like "Manufacturing").',
       confidence: 'low',
       citations: [],
+      conflicts: [],
       retrievedCount: 0,
       latencyMs: Date.now() - t0,
       model: MODEL,
@@ -272,17 +305,93 @@ export async function askCanon(args: {
         `kept ${goodCitations.length}`,
     );
   }
+
+  // Extract structured conflict cards from the retrieved candidates so the
+  // UI can render Pick / Distinct buttons. Server-side aggregation, no
+  // model hallucination — every card is grounded in real factIds.
+  const inlineConflicts = intent === 'conflict' ? buildConflictCards(candidates) : [];
+
   console.log(
     `[askCanon] DONE q="${q.slice(0, 60)}" · cited=${goodCitations.length} · ` +
-      `conf=${parsed.confidence} · total=${Date.now() - t0}ms`,
+      `conflicts=${inlineConflicts.length} · conf=${parsed.confidence} · ` +
+      `total=${Date.now() - t0}ms`,
   );
 
   return {
     answer: parsed.answer,
     confidence: parsed.confidence,
     citations: goodCitations,
+    conflicts: inlineConflicts,
     retrievedCount: candidates.length,
     latencyMs: Date.now() - t0,
     model: MODEL,
   };
+}
+
+const ENTITY_DISPLAY_FOR_ASK: Record<string, string> = {
+  inazuma: 'Inazuma.co',
+  miller_group: 'Miller Group',
+  gonzalez_inc: 'Gonzalez Inc',
+  johnson_group: 'Johnson Group',
+  huang_llc: 'Huang LLC',
+  williams_group: 'Williams Group',
+  martin_ltd: 'Martin Ltd',
+  bright_plc: 'Bright Plc',
+};
+
+function entityDisplay(slug: string): string {
+  if (ENTITY_DISPLAY_FOR_ASK[slug]) return ENTITY_DISPLAY_FOR_ASK[slug];
+  // Pretty-print snake_case slugs (e.g. "vaughan_technologies" → "Vaughan Technologies")
+  return slug
+    .split('_')
+    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+    .join(' ');
+}
+
+/**
+ * Group candidates by (entity, metricKey) and emit one InlineConflict per
+ * pair with ≥2 distinct values. Each candidate carries the factId so the
+ * UI's Pick button can fire resolveConflict({mode:'canonical', winnerFactId})
+ * directly.
+ */
+function buildConflictCards(rows: CanonCitation[]): InlineConflict[] {
+  const byPair = new Map<
+    string,
+    {
+      entity: string;
+      metricKey: string;
+      // Dedupe by metricValue so a cluster with 5 corroborating facts shows
+      // up as one card with one candidate, not five duplicates.
+      byValue: Map<string, ConflictCandidate>;
+    }
+  >();
+  for (const r of rows) {
+    if (!r.metricKey || r.metricValue === null) continue;
+    const k = `${r.entity}::${r.metricKey}`;
+    if (!byPair.has(k)) {
+      byPair.set(k, { entity: r.entity, metricKey: r.metricKey, byValue: new Map() });
+    }
+    const slot = byPair.get(k)!;
+    if (!slot.byValue.has(r.metricValue)) {
+      slot.byValue.set(r.metricValue, {
+        factId: r.factId,
+        value: r.metricValue,
+        unit: null,
+        sourceRef: r.sourceRef,
+        sourceExcerpt: r.sourceExcerpt,
+        observedAt: null,
+      });
+    }
+  }
+  const out: InlineConflict[] = [];
+  for (const slot of byPair.values()) {
+    if (slot.byValue.size < 2) continue;
+    out.push({
+      entity: slot.entity,
+      entityDisplay: entityDisplay(slot.entity),
+      metricKey: slot.metricKey,
+      candidates: [...slot.byValue.values()],
+    });
+  }
+  return out;
 }

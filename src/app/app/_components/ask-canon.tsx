@@ -13,7 +13,13 @@
 
 import { useState, useTransition } from 'react';
 import { askCanonAction } from '../_actions/ask-canon';
-import type { CanonAnswer, CanonCitation } from '@/lib/canon/ask';
+import { resolveConflict } from '../_actions/resolve';
+import type {
+  CanonAnswer,
+  CanonCitation,
+  InlineConflict,
+  ConflictCandidate,
+} from '@/lib/canon/ask';
 
 const SUGGESTIONS = [
   'What\'s the conflict on Miller Group?',
@@ -155,12 +161,228 @@ function AnswerBlock({ answer }: { answer: CanonAnswer }) {
       <p className="text-sm leading-relaxed text-zinc-900 dark:text-zinc-100">
         {renderAnswerWithCitations(answer.answer, citationById)}
       </p>
+
+      {/* Inline conflict-resolution cards — populated when intent=conflict.
+          Each card lets the user sign canonical / distinct without
+          leaving the chat. Server-extracted, no Gemini hallucination. */}
+      {answer.conflicts.length > 0 && (
+        <div className="mt-3 space-y-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-violet-700 dark:text-violet-300">
+            {answer.conflicts.length} conflict
+            {answer.conflicts.length === 1 ? '' : 's'} surfaced — resolve inline
+          </p>
+          {answer.conflicts.map((c) => (
+            <FightCard key={`${c.entity}::${c.metricKey}`} conflict={c} />
+          ))}
+        </div>
+      )}
+
       {answer.citations.length > 0 && (
-        <div className="mt-2 grid gap-2">
+        <div className="mt-3 grid gap-2">
           {answer.citations.map((c, i) => (
             <CitationCard key={c.factId} index={i + 1} cite={c} />
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- *
+ * Fight cards — inline conflict resolution surface in the chat answer.
+ * Each card has N candidate values (signed FactEvents); user picks one as
+ * canonical or marks all distinct. Both paths fire the existing
+ * resolveConflict server action and produce a signed ResolutionEvent.
+ * -------------------------------------------------------------------------- */
+
+type FightOutcome =
+  | { kind: 'canonical'; winnerFactId: string; superseded: number; resolutionFactId: string }
+  | { kind: 'distinct'; resolutionFactId: string };
+
+function FightCard({ conflict }: { conflict: InlineConflict }) {
+  const [outcome, setOutcome] = useState<FightOutcome | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, start] = useTransition();
+  const [pendingId, setPendingId] = useState<string | null>(null);
+
+  const allFactIds = conflict.candidates.map((c) => c.factId);
+
+  function pickCanonical(winnerFactId: string) {
+    setError(null);
+    setPendingId(winnerFactId);
+    start(async () => {
+      try {
+        const r = await resolveConflict({
+          mode: 'canonical',
+          entity: conflict.entity,
+          metricKey: conflict.metricKey,
+          winnerFactId,
+        });
+        if (!r.ok) {
+          setError('Resolve refused — server returned ok=false');
+          setPendingId(null);
+          return;
+        }
+        setOutcome({
+          kind: 'canonical',
+          winnerFactId,
+          superseded: r.superseded,
+          resolutionFactId: r.resolutionFactId ?? '',
+        });
+        setPendingId(null);
+      } catch (e) {
+        setError((e as Error).message ?? 'Resolve failed');
+        setPendingId(null);
+      }
+    });
+  }
+
+  function markDistinct() {
+    setError(null);
+    setPendingId('__distinct__');
+    start(async () => {
+      try {
+        const r = await resolveConflict({
+          mode: 'distinct',
+          entity: conflict.entity,
+          metricKey: conflict.metricKey,
+          candidateFactIds: allFactIds,
+        });
+        if (!r.ok) {
+          setError('Distinct refused — server returned ok=false');
+          setPendingId(null);
+          return;
+        }
+        setOutcome({
+          kind: 'distinct',
+          resolutionFactId: r.resolutionFactId ?? '',
+        });
+        setPendingId(null);
+      } catch (e) {
+        setError((e as Error).message ?? 'Distinct failed');
+        setPendingId(null);
+      }
+    });
+  }
+
+  const winnerFactId = outcome?.kind === 'canonical' ? outcome.winnerFactId : null;
+
+  return (
+    <div className="rounded-xl border border-amber-300 bg-amber-50/60 p-3 dark:border-amber-700/50 dark:bg-amber-950/30">
+      <div className="flex items-baseline justify-between gap-2">
+        <p className="font-mono text-[11px] font-semibold uppercase tracking-wider text-amber-900 dark:text-amber-200">
+          {conflict.entityDisplay} · {conflict.metricKey}
+        </p>
+        <span className="font-mono text-[10px] text-amber-700/70 dark:text-amber-300/60">
+          {conflict.candidates.length} candidates
+        </span>
+      </div>
+
+      <div
+        className={`mt-2 grid gap-2 ${
+          conflict.candidates.length === 2
+            ? 'sm:grid-cols-2'
+            : 'sm:grid-cols-2 md:grid-cols-3'
+        }`}
+      >
+        {conflict.candidates.map((cand) => (
+          <CandidateBox
+            key={cand.factId}
+            cand={cand}
+            isWinner={winnerFactId === cand.factId}
+            isLoser={!!winnerFactId && winnerFactId !== cand.factId}
+            isPending={pending && pendingId === cand.factId}
+            disabled={pending || !!outcome}
+            onPick={() => pickCanonical(cand.factId)}
+          />
+        ))}
+      </div>
+
+      {!outcome && (
+        <div className="mt-2 flex items-center justify-end">
+          <button
+            type="button"
+            onClick={markDistinct}
+            disabled={pending}
+            className="inline-flex h-7 items-center justify-center rounded-full border border-sky-700 bg-sky-100 px-3 font-mono text-[10px] font-semibold uppercase tracking-wider text-sky-900 transition-colors hover:bg-sky-200 disabled:opacity-60 dark:border-sky-500 dark:bg-sky-900/40 dark:text-sky-100 dark:hover:bg-sky-900/70"
+          >
+            {pending && pendingId === '__distinct__'
+              ? 'signing…'
+              : 'Mark all as distinct'}
+          </button>
+        </div>
+      )}
+
+      {outcome && (
+        <div className="mt-2 rounded-md bg-emerald-100 px-3 py-1.5 font-mono text-[10px] text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200">
+          ✓{' '}
+          {outcome.kind === 'canonical'
+            ? `Signed as canonical · ${outcome.superseded} superseded`
+            : 'Signed as distinct records — none superseded'}
+          {outcome.resolutionFactId && (
+            <span className="ml-1 text-emerald-700/70 dark:text-emerald-300/60">
+              · resolution {outcome.resolutionFactId.slice(0, 18)}…
+            </span>
+          )}
+        </div>
+      )}
+
+      {error && (
+        <p className="mt-2 text-[11px] text-rose-700 dark:text-rose-300">{error}</p>
+      )}
+    </div>
+  );
+}
+
+function CandidateBox({
+  cand,
+  isWinner,
+  isLoser,
+  isPending,
+  disabled,
+  onPick,
+}: {
+  cand: ConflictCandidate;
+  isWinner: boolean;
+  isLoser: boolean;
+  isPending: boolean;
+  disabled: boolean;
+  onPick: () => void;
+}) {
+  const kind = cand.sourceRef.split(':', 1)[0];
+  const tone = isWinner
+    ? 'border-emerald-500 bg-emerald-50 dark:border-emerald-600 dark:bg-emerald-950/40'
+    : isLoser
+      ? 'border-zinc-200 bg-zinc-50 opacity-50 dark:border-zinc-800 dark:bg-zinc-900/40'
+      : 'border-amber-200 bg-white dark:border-amber-800/40 dark:bg-zinc-950';
+  return (
+    <div className={`flex flex-col gap-1.5 rounded-lg border p-2 ${tone}`}>
+      <p className="break-words text-base font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+        {cand.value ?? '—'}
+        {cand.unit && <span className="ml-1 text-xs text-zinc-500">{cand.unit}</span>}
+      </p>
+      {cand.sourceExcerpt && (
+        <p className="line-clamp-2 font-mono text-[10px] text-zinc-600 dark:text-zinc-400">
+          “{cand.sourceExcerpt}”
+        </p>
+      )}
+      <p className="break-all font-mono text-[9px] text-zinc-500">
+        {kind} · {cand.factId.slice(0, 18)}…
+      </p>
+      {!isWinner && (
+        <button
+          type="button"
+          onClick={onPick}
+          disabled={disabled}
+          className="mt-1 inline-flex h-7 items-center justify-center rounded-full bg-zinc-950 px-3 text-[10px] font-semibold text-white transition-colors hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+        >
+          {isPending ? 'signing…' : 'Sign as canonical →'}
+        </button>
+      )}
+      {isWinner && (
+        <p className="mt-1 text-center font-mono text-[10px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
+          ✓ canonical
+        </p>
       )}
     </div>
   );
