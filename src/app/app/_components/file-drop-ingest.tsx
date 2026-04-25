@@ -24,6 +24,17 @@ interface ProgressEvent {
   fact?: SignedFact;
 }
 
+interface AggregateStats {
+  active: number;
+  redacted: number;
+  superseded: number;
+  conflictsLive: number;
+  corroborated: number;
+  autoResolved: number;
+  durationMs: number;
+  files: number;
+}
+
 const PHASE_LABEL: Record<Phase, string> = {
   init: 'INIT',
   parse: 'PARSE',
@@ -39,100 +50,155 @@ const PHASE_ORDER: Phase[] = ['init', 'parse', 'extract', 'sign', 'conflict', 'd
 const ACCEPT =
   '.json,.ndjson,.csv,.txt,.md,.pdf,application/json,text/csv,text/plain,application/pdf';
 
+const ALLOWED_EXTS = ['json', 'ndjson', 'csv', 'txt', 'md', 'pdf'];
+
 interface Props {
   workspace: 'inazuma' | 'northwind' | 'upload';
 }
 
 /**
- * Drag-and-drop / click-to-pick file uploader. POSTs to /api/ingest-upload
- * as multipart/form-data and consumes the SSE response. As facts get
- * signed, rows render live in a tail-style preview so the audience watches
- * the pipeline's output emerge in real time.
+ * Drag-and-drop / click-to-pick file uploader.
+ *
+ * Single-file: drop one file or pick one — runs through /api/ingest-upload
+ * and renders the SSE stream live (phase pipeline, progress bar, signed
+ * fact rows, final summary).
+ *
+ * Multi-file / folder: drop many files at once or drag a whole directory.
+ * The component traverses the dropped entries via webkitGetAsEntry,
+ * filters to known filetypes, and ingests them sequentially through
+ * the same SSE channel. The signed-fact tail accumulates across the
+ * queue so the audience sees facts compounding from many sources.
  */
 export function FileDropIngest({ workspace }: Props) {
   const router = useRouter();
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputFileRef = useRef<HTMLInputElement>(null);
+  const inputFolderRef = useRef<HTMLInputElement>(null);
   const [running, setRunning] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const [filename, setFilename] = useState<string | null>(null);
+  const [queue, setQueue] = useState<{ idx: number; total: number; name: string } | null>(
+    null,
+  );
   const [latest, setLatest] = useState<ProgressEvent | null>(null);
-  const [final, setFinal] = useState<ProgressEvent | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [signedFacts, setSignedFacts] = useState<SignedFact[]>([]);
+  const [agg, setAgg] = useState<AggregateStats | null>(null);
+  const [finishedAll, setFinishedAll] = useState(false);
 
-  const startUpload = useCallback(
-    async (file: File) => {
-      setRunning(true);
-      setFilename(file.name);
-      setLatest(null);
-      setFinal(null);
-      setError(null);
-      setSignedFacts([]);
-
+  /** Run a single file → /api/ingest-upload, fold its result into agg. */
+  const ingestOne = useCallback(
+    async (file: File): Promise<boolean> => {
       const fd = new FormData();
       fd.append('file', file);
       fd.append('workspace', workspace);
 
-      try {
-        const res = await fetch('/api/ingest-upload', {
-          method: 'POST',
-          body: fd,
-        });
-        if (!res.ok || !res.body) {
-          let msg = `HTTP ${res.status}`;
+      const res = await fetch('/api/ingest-upload', { method: 'POST', body: fd });
+      if (!res.ok || !res.body) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = await res.json();
+          if (j?.error) msg = j.error;
+        } catch {
+          /* fallthrough */
+        }
+        setError(`${file.name}: ${msg}`);
+        return false;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let lastDoneEvent: ProgressEvent | null = null;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf('\n\n')) !== -1) {
+          const chunk = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 2);
+          if (!chunk.startsWith('data: ')) continue;
           try {
-            const j = await res.json();
-            if (j?.error) msg = j.error;
-          } catch {
-            /* fallthrough */
-          }
-          throw new Error(msg);
-        }
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = '';
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          let nl: number;
-          while ((nl = buf.indexOf('\n\n')) !== -1) {
-            const chunk = buf.slice(0, nl).trim();
-            buf = buf.slice(nl + 2);
-            if (!chunk.startsWith('data: ')) continue;
-            try {
-              const event = JSON.parse(chunk.slice(6)) as ProgressEvent;
-              setLatest(event);
-              if (event.fact) {
-                const f = event.fact;
-                setSignedFacts((prev) => {
-                  if (prev.some((p) => p.factId === f.factId)) return prev;
-                  return [...prev, f].slice(-200);
-                });
-              }
-              if (event.phase === 'done') setFinal(event);
-              if (event.phase === 'error') setError(event.message ?? 'unknown');
-            } catch {
-              /* ignore malformed line */
+            const event = JSON.parse(chunk.slice(6)) as ProgressEvent;
+            setLatest(event);
+            if (event.fact) {
+              const f = event.fact;
+              setSignedFacts((prev) => {
+                if (prev.some((p) => p.factId === f.factId)) return prev;
+                return [...prev, f].slice(-300);
+              });
             }
+            if (event.phase === 'done') lastDoneEvent = event;
+            if (event.phase === 'error') {
+              setError(`${file.name}: ${event.message ?? 'unknown'}`);
+              return false;
+            }
+          } catch {
+            /* ignore malformed line */
           }
         }
-      } catch (e) {
-        setError((e as Error).message);
+      }
+
+      // Fold this file's stats into the aggregate. The resolveUserConflicts
+      // pass returns a workspace-wide snapshot, so conflictsLive is the
+      // CURRENT count after this file landed (not additive). Take the max
+      // we've seen so the UI shows the live-now conflict count, not a sum.
+      const data = (lastDoneEvent?.data ?? {}) as Partial<AggregateStats>;
+      setAgg((prev) => ({
+        active: (prev?.active ?? 0) + (data.active ?? 0),
+        redacted: (prev?.redacted ?? 0) + (data.redacted ?? 0),
+        superseded: (prev?.superseded ?? 0) + (data.superseded ?? 0),
+        conflictsLive: data.conflictsLive ?? prev?.conflictsLive ?? 0,
+        corroborated: data.corroborated ?? prev?.corroborated ?? 0,
+        autoResolved: (prev?.autoResolved ?? 0) + (data.autoResolved ?? 0),
+        durationMs: (prev?.durationMs ?? 0) + (data.durationMs ?? 0),
+        files: (prev?.files ?? 0) + 1,
+      }));
+      return true;
+    },
+    [workspace],
+  );
+
+  /** Drive a queue of files through /api/ingest-upload sequentially. */
+  const startQueue = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) return;
+      setRunning(true);
+      setLatest(null);
+      setError(null);
+      setSignedFacts([]);
+      setAgg(null);
+      setFinishedAll(false);
+
+      try {
+        for (let i = 0; i < files.length; i++) {
+          setQueue({ idx: i + 1, total: files.length, name: files[i].name });
+          const ok = await ingestOne(files[i]);
+          if (!ok) break;
+        }
       } finally {
         setRunning(false);
+        setFinishedAll(true);
         router.refresh();
       }
     },
-    [router, workspace],
+    [ingestOne, router],
   );
 
-  const onFiles = useCallback(
-    (files: FileList | null) => {
-      if (!files || files.length === 0 || running) return;
-      void startUpload(files[0]);
+  /** Triggered by both the file drop and the click-to-pick inputs. */
+  const onIncomingFiles = useCallback(
+    async (filesIn: File[]) => {
+      if (running) return;
+      const filtered = filesIn
+        .filter((f) => f.size > 0)
+        .filter((f) => extOf(f.name) && ALLOWED_EXTS.includes(extOf(f.name)!));
+      if (filtered.length === 0) {
+        setError(
+          `No supported files found. Accepted: ${ALLOWED_EXTS.map((x) => '.' + x).join(', ')}`,
+        );
+        return;
+      }
+      void startQueue(filtered);
     },
-    [running, startUpload],
+    [running, startQueue],
   );
 
   const phaseIdx = latest ? PHASE_ORDER.indexOf(latest.phase) : -1;
@@ -140,17 +206,6 @@ export function FileDropIngest({ workspace }: Props) {
     latest && latest.total && latest.total > 0
       ? Math.min(100, Math.round((100 * (latest.done ?? 0)) / latest.total))
       : null;
-
-  const finalData = (final?.data ?? {}) as {
-    active?: number;
-    redacted?: number;
-    superseded?: number;
-    conflictsLive?: number;
-    corroborated?: number;
-    autoResolved?: number;
-    durationMs?: number;
-    workspace?: string;
-  };
 
   return (
     <div className="flex w-full flex-col items-stretch gap-3">
@@ -166,12 +221,14 @@ export function FileDropIngest({ workspace }: Props) {
           if (!running) setDragOver(true);
         }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => {
+        onDrop={async (e) => {
           e.preventDefault();
           setDragOver(false);
-          if (!running) onFiles(e.dataTransfer.files);
+          if (running) return;
+          const files = await collectFromDrop(e.dataTransfer);
+          await onIncomingFiles(files);
         }}
-        className={`relative flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-4 py-5 text-center transition-colors ${
+        className={`relative flex min-h-[140px] cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-4 py-5 text-center transition-colors ${
           running
             ? 'border-zinc-300 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900/30'
             : dragOver
@@ -180,13 +237,25 @@ export function FileDropIngest({ workspace }: Props) {
         }`}
       >
         <input
-          ref={inputRef}
+          ref={inputFileRef}
           id="canon-file-input"
           type="file"
           accept={ACCEPT}
+          multiple
           className="sr-only"
           disabled={running}
-          onChange={(e) => onFiles(e.target.files)}
+          onChange={(e) => onIncomingFiles(Array.from(e.target.files ?? []))}
+        />
+        <input
+          ref={inputFolderRef}
+          type="file"
+          /* @ts-expect-error — webkitdirectory is non-standard but supported. */
+          webkitdirectory=""
+          directory=""
+          multiple
+          className="sr-only"
+          disabled={running}
+          onChange={(e) => onIncomingFiles(Array.from(e.target.files ?? []))}
         />
 
         {running ? (
@@ -194,26 +263,33 @@ export function FileDropIngest({ workspace }: Props) {
             <div className="flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-200">
               <Spinner />
               <span>
-                Ingesting <span className="font-mono text-xs">{filename}</span>…
+                {queue ? (
+                  <>
+                    [{queue.idx}/{queue.total}] Ingesting{' '}
+                    <span className="font-mono text-xs">{queue.name}</span>…
+                  </>
+                ) : (
+                  <>Ingesting…</>
+                )}
               </span>
             </div>
             <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-400">
               {latest?.phase ? PHASE_LABEL[latest.phase] : 'starting'}
             </p>
           </>
-        ) : final ? (
+        ) : finishedAll && agg ? (
           <>
             <p className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
-              ✓ {filename} ingested
+              ✓ Ingested {agg.files} file{agg.files === 1 ? '' : 's'}
             </p>
             <p className="text-xs text-zinc-500">
-              Drop another file to extend the workspace, or resolve conflicts below.
+              Drop more files (or a folder) to extend the workspace.
             </p>
           </>
         ) : (
           <>
             <p className="text-sm font-medium text-zinc-800 dark:text-zinc-100">
-              Drop a file to ingest, or click to pick one
+              Drop files or a folder, or click to pick
             </p>
             <p className="text-xs text-zinc-500">
               JSON · NDJSON · CSV · TXT · MD · PDF — facts land in workspace{' '}
@@ -221,18 +297,52 @@ export function FileDropIngest({ workspace }: Props) {
                 {workspace}
               </span>
             </p>
+            <div className="mt-1 flex gap-2 text-[11px]">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  inputFileRef.current?.click();
+                }}
+                className="rounded-full border border-zinc-300 bg-white px-3 py-1 font-medium text-zinc-700 hover:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+              >
+                Pick file(s)
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  inputFolderRef.current?.click();
+                }}
+                className="rounded-full border border-zinc-300 bg-white px-3 py-1 font-medium text-zinc-700 hover:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+              >
+                Pick folder
+              </button>
+            </div>
           </>
         )}
       </label>
 
       {/* Live pipeline panel */}
-      {(running || latest || error || final) && (
+      {(running || latest || error || finishedAll) && (
         <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+          {/* Queue header */}
+          {running && queue && queue.total > 1 && (
+            <div className="mb-3 flex items-center justify-between rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 dark:border-zinc-800 dark:bg-zinc-900/40">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+                queue · file {queue.idx} of {queue.total}
+              </span>
+              <span className="font-mono text-[10px] text-zinc-700 dark:text-zinc-300">
+                {queue.name}
+              </span>
+            </div>
+          )}
+
           {/* Phase pipeline */}
           <div className="flex flex-wrap items-center gap-1 text-[10px] font-mono uppercase tracking-wider">
             {PHASE_ORDER.map((p, i) => {
               const reached = phaseIdx >= i;
-              const active = phaseIdx === i && !final && !error;
+              const active = phaseIdx === i && running;
               return (
                 <span key={p} className="flex items-center gap-1">
                   <span
@@ -255,7 +365,7 @@ export function FileDropIngest({ workspace }: Props) {
           </div>
 
           {/* Progress bar */}
-          {progress !== null && (
+          {progress !== null && running && (
             <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-900">
               <div
                 className="h-full rounded-full bg-emerald-500 transition-all duration-200"
@@ -263,14 +373,14 @@ export function FileDropIngest({ workspace }: Props) {
               />
             </div>
           )}
-          {progress !== null && (
+          {progress !== null && running && (
             <p className="mt-1 font-mono text-[10px] text-zinc-500">
               {latest?.done}/{latest?.total} · {progress}%
             </p>
           )}
 
           {/* Latest status message */}
-          {latest?.message && !final && !error && (
+          {latest?.message && running && (
             <p className="mt-2 text-xs text-zinc-700 dark:text-zinc-300">
               {latest.message}
             </p>
@@ -278,9 +388,9 @@ export function FileDropIngest({ workspace }: Props) {
 
           {/* Streaming fact rows */}
           {signedFacts.length > 0 && (
-            <div className="mt-3 max-h-64 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
+            <div className="mt-3 max-h-72 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
               <ul className="divide-y divide-zinc-200 font-mono text-[11px] leading-snug dark:divide-zinc-800">
-                {signedFacts.slice(-50).map((f) => (
+                {signedFacts.slice(-80).map((f) => (
                   <li
                     key={f.factId}
                     className="flex items-start gap-2 px-3 py-1.5"
@@ -296,30 +406,34 @@ export function FileDropIngest({ workspace }: Props) {
                   </li>
                 ))}
               </ul>
+              <p className="border-t border-zinc-200 bg-white px-3 py-1 font-mono text-[10px] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950">
+                {signedFacts.length} signed event{signedFacts.length === 1 ? '' : 's'}{' '}
+                · tail of {Math.min(signedFacts.length, 80)} shown
+              </p>
             </div>
           )}
 
-          {/* Final summary */}
-          {final && (
+          {/* Aggregate summary (visible during + after) */}
+          {agg && (
             <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-700/50 dark:bg-emerald-950/30">
-              <Stat label="active" value={finalData.active ?? 0} />
-              <Stat label="redacted" value={finalData.redacted ?? 0} />
-              <Stat label="conflicts" value={finalData.conflictsLive ?? 0} />
-              <Stat label="corroborated" value={finalData.corroborated ?? 0} />
-              <Stat label="auto-resolved" value={finalData.autoResolved ?? 0} />
+              <Stat label="active" value={agg.active} />
+              <Stat label="redacted" value={agg.redacted} />
+              <Stat label="conflicts" value={agg.conflictsLive} />
+              <Stat label="corroborated" value={agg.corroborated} />
+              <Stat label="auto-resolved" value={agg.autoResolved} />
               <Stat
                 label="duration"
-                value={`${((finalData.durationMs ?? 0) / 1000).toFixed(1)}s`}
+                value={`${(agg.durationMs / 1000).toFixed(1)}s`}
               />
             </div>
           )}
 
           {/* Conflict CTA */}
-          {final && (finalData.conflictsLive ?? 0) > 0 && (
+          {finishedAll && agg && agg.conflictsLive > 0 && (
             <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 dark:border-amber-700/50 dark:bg-amber-950/30">
               <p className="text-xs font-medium text-amber-900 dark:text-amber-200">
-                {finalData.conflictsLive} unresolved conflict
-                {finalData.conflictsLive === 1 ? '' : 's'} need your decision —
+                {agg.conflictsLive} unresolved conflict
+                {agg.conflictsLive === 1 ? '' : 's'} need your decision —
                 scroll down to resolve.
               </p>
               <button
@@ -346,6 +460,71 @@ export function FileDropIngest({ workspace }: Props) {
       )}
     </div>
   );
+}
+
+/* ---------------------------------------------------------------- *
+ *  Drop traversal — collect File[] from a DataTransfer that may
+ *  carry plain files OR a folder (via webkitGetAsEntry).
+ * ---------------------------------------------------------------- */
+
+async function collectFromDrop(dt: DataTransfer): Promise<File[]> {
+  // Prefer items[] when available — it exposes folder entries via
+  // webkitGetAsEntry. Fall back to dt.files for older browsers / drops
+  // that aren't directory-shaped.
+  const out: File[] = [];
+  const items = dt.items ? Array.from(dt.items) : [];
+  if (items.length > 0 && typeof items[0].webkitGetAsEntry === 'function') {
+    const entries = items
+      .filter((it) => it.kind === 'file')
+      .map((it) => it.webkitGetAsEntry())
+      .filter((e): e is FileSystemEntry => e !== null);
+    for (const e of entries) await walkEntry(e, out);
+    if (out.length > 0) return out;
+  }
+  // Fallback: plain file list.
+  if (dt.files && dt.files.length > 0) {
+    return Array.from(dt.files);
+  }
+  return out;
+}
+
+async function walkEntry(entry: FileSystemEntry, out: File[]): Promise<void> {
+  if (entry.isFile) {
+    const fileEntry = entry as FileSystemFileEntry;
+    await new Promise<void>((resolve) => {
+      fileEntry.file(
+        (file) => {
+          // Skip hidden / metadata files macOS inserts in zips and folders.
+          if (!file.name.startsWith('.') && !file.name.startsWith('._')) {
+            out.push(file);
+          }
+          resolve();
+        },
+        () => resolve(),
+      );
+    });
+    return;
+  }
+  if (entry.isDirectory) {
+    const dirEntry = entry as FileSystemDirectoryEntry;
+    const reader = dirEntry.createReader();
+    // readEntries returns batches of up to ~100 entries; loop until empty.
+    while (true) {
+      const batch: FileSystemEntry[] = await new Promise((resolve) => {
+        reader.readEntries(
+          (entries) => resolve(entries),
+          () => resolve([]),
+        );
+      });
+      if (batch.length === 0) break;
+      for (const child of batch) await walkEntry(child, out);
+    }
+  }
+}
+
+function extOf(name: string): string | null {
+  const m = name.toLowerCase().match(/\.([a-z0-9]+)$/);
+  return m ? m[1] : null;
 }
 
 function Stat({ label, value }: { label: string; value: string | number }) {
