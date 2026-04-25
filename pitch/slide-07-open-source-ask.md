@@ -4,7 +4,7 @@
 
 ## On screen (≤70 words)
 
-**github.com/ThePyth0nKid/canonBigHackBerlin** — MIT
+**Live:** canon.ultranova.io · **Repo:** github.com/ThePyth0nKid/canonBigHackBerlin · MIT
 
 - 5 MCP tools: `lookup` · `search` · `cite` · `diff` · `write` (v0.2)
 - 3 source adapters live: Slack · Gmail · PDF

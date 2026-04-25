@@ -9,6 +9,7 @@
 ## Pre-stage checklist (T-5 min)
 
 - [ ] `/Users/nelsonmehlis/Desktop/canon` — `npm run dev` running on :3000
+- [ ] Production URL **canon.ultranova.io** is up — quick `curl -I https://canon.ultranova.io/` should return 200. This is the URL jurors can type into their phone live during the pitch.
 - [ ] **T-3 min: rehearse one full Sync** so the DB has fresh facts, then leave it. /app shows ~50 active facts.
 - [ ] **T-2 min: pre-warm MCP** — in Claude Code, run `Was wissen wir über northwind?` once. Eliminates 5-15s npx-tsx cold start mid-pitch.
 - [ ] Confirm `/app` shows ⚠ Resolve conflict on **ACME · seats** (the demo's signature beat). If it auto-resolved → click `Sync now` once more, the next batch usually surfaces it again. Worst case: pick a different conflict (Globex, Soylent).
