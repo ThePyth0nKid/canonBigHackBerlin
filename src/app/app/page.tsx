@@ -5,6 +5,7 @@ import { ProofButton } from './_components/proof-modal';
 import { ConflictResolve } from './_components/conflict-resolve';
 import { SourcePill } from './_components/source-pill';
 import { AikidoRepoBanner } from './_components/aikido-banner';
+import { SyncButton } from './_components/sync-button';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,6 +37,7 @@ export default async function WorkspacePage() {
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <AikidoRepoBanner />
+            <SyncButton />
             <form
               action={async () => {
                 'use server';
@@ -63,8 +65,8 @@ function EmptyState() {
     <div className="mt-10 rounded-2xl border border-dashed border-zinc-300 bg-white p-12 text-center dark:border-zinc-700 dark:bg-zinc-950">
       <p className="text-sm text-zinc-500">No facts in this workspace yet.</p>
       <p className="mt-2 text-sm text-zinc-500">
-        Run <code className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-xs dark:bg-zinc-900">npx tsx scripts/sync-smoke.ts</code> or
-        click <span className="font-medium">Sync now</span> once it ships.
+        Click <span className="font-medium">Sync now</span> in the header to
+        ingest from Slack, Gmail, and the Q1 board deck.
       </p>
     </div>
   );

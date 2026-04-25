@@ -69,6 +69,7 @@ export async function runPipeline(input: PipelineRunInput): Promise<PipelineRunR
   let redacted = 0;
   let superseded = 0;
 
+  let signFailures = 0;
   try {
     for (let i = 0; i < drafts.length; i++) {
       const draft = drafts[i];
@@ -81,15 +82,31 @@ export async function runPipeline(input: PipelineRunInput): Promise<PipelineRunR
       const excerptToSign =
         decision.status === 'redacted' ? '<redacted>' : draft.sourceExcerpt;
 
-      const signRes = await signer.sign({
-        factId,
-        entity: draft.entity,
-        claim: claimToSign,
-        sourceRef: draft.sourceRef,
-        sourceExcerpt: excerptToSign,
-        parentHash,
-        createdAtMs: Date.now(),
-      });
+      let signRes;
+      try {
+        signRes = await signer.sign({
+          factId,
+          entity: draft.entity,
+          claim: claimToSign,
+          sourceRef: draft.sourceRef,
+          sourceExcerpt: excerptToSign,
+          parentHash,
+          createdAtMs: Date.now(),
+        });
+      } catch (err) {
+        // Sign failure must not corrupt the chain: skip persistence, keep
+        // parentHash anchored on the previous successful event, and mark the
+        // draft as a known-failed outcome so the orchestrator can surface it.
+        signFailures++;
+        outcomes.push({
+          factId,
+          status: 'superseded',
+          eventHash: '',
+          parentHashForNext: parentHash,
+          notes: `sign_failed:${truncate((err as Error).message, 160)}`,
+        });
+        continue;
+      }
 
       await prisma.factEvent.create({
         data: {
@@ -129,6 +146,7 @@ export async function runPipeline(input: PipelineRunInput): Promise<PipelineRunR
   } finally {
     if (ownsSigner) await signer.close();
   }
+  if (signFailures > 0) superseded += signFailures;
 
   return { outcomes, active, redacted, superseded };
 }
@@ -165,4 +183,8 @@ function parseObserved(s: string): Date | null {
   if (!s) return null;
   const d = new Date(s);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 1) + '…';
 }

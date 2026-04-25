@@ -14,7 +14,7 @@ export interface FactRow {
   metricUnit: string | null;
   sourceRef: string;
   sourceExcerpt: string | null;
-  status: 'active' | 'redacted' | 'superseded';
+  status: 'active' | 'redacted' | 'superseded' | 'resolution';
   notes: string | null;
   parentHash: string | null;
   eventHash: string;
@@ -89,8 +89,9 @@ export interface FactLandscape {
 
 export async function loadFactLandscape(userId: string): Promise<FactLandscape> {
   const rows = await prisma.factEvent.findMany({
-    where: { userId },
+    where: { userId, NOT: { status: 'resolution' } },
     orderBy: { signedAt: 'asc' },
+    take: 5000,
   });
   const facts = rows.map(toFactRow);
 

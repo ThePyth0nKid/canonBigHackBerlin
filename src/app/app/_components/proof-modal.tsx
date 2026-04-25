@@ -91,7 +91,10 @@ function ProofModal({ fact, onClose }: { fact: FactRow; onClose: () => void }) {
             <span className="text-xs font-mono uppercase tracking-wide text-zinc-500">
               COSE_Sign1 (hex)
             </span>
-            <CopyButton value={fact.coseSign1Hex} />
+            <div className="flex items-center gap-3">
+              <VerifyButton factId={fact.id} />
+              <CopyButton value={fact.coseSign1Hex} />
+            </div>
           </div>
           <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] leading-snug text-zinc-700 dark:text-zinc-300">
             {fact.coseSign1Hex}
@@ -99,12 +102,65 @@ function ProofModal({ fact, onClose }: { fact: FactRow; onClose: () => void }) {
         </div>
 
         <p className="mt-4 text-xs text-zinc-500">
-          Verifiable offline via canon-verify-wasm against the signer pubkey
-          above. Same input → same hash; tamper any byte and the signature
-          fails.
+          Verified by <code className="font-mono">canon-verify</code> — a
+          separate binary from the signer. Tamper any byte and the signature
+          fails. The signer pubkey above is what an external agent pins.
         </p>
       </div>
     </div>
+  );
+}
+
+interface VerifyResp {
+  verified: boolean;
+  eventHash?: string;
+  kid?: string;
+  error?: string;
+  latencyMs?: number;
+}
+
+function VerifyButton({ factId }: { factId: string }) {
+  const [pending, setPending] = useState(false);
+  const [result, setResult] = useState<VerifyResp | null>(null);
+
+  return (
+    <span className="inline-flex items-center gap-2">
+      {result ? (
+        result.verified ? (
+          <span className="font-mono text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+            ✓ verified · {result.latencyMs}ms
+          </span>
+        ) : (
+          <span className="font-mono text-[11px] font-medium text-rose-600 dark:text-rose-400">
+            ✗ {result.error ?? 'failed'}
+          </span>
+        )
+      ) : null}
+      <button
+        type="button"
+        disabled={pending}
+        onClick={async () => {
+          setPending(true);
+          setResult(null);
+          try {
+            const res = await fetch('/api/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ factId }),
+            });
+            const data = (await res.json()) as VerifyResp;
+            setResult(data);
+          } catch (e) {
+            setResult({ verified: false, error: (e as Error).message });
+          } finally {
+            setPending(false);
+          }
+        }}
+        className="text-xs font-medium text-zinc-500 hover:text-zinc-900 disabled:opacity-50 dark:hover:text-zinc-50"
+      >
+        {pending ? 'verifying…' : 'verify'}
+      </button>
+    </span>
   );
 }
 

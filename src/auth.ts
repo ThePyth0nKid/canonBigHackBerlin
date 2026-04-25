@@ -26,6 +26,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       },
     }),
   ],
+  callbacks: {
+    session({ session, user }) {
+      // PrismaAdapter database sessions don't auto-forward user.id.
+      // Required so server components / actions can scope queries.
+      if (session.user) (session.user as { id?: string }).id = user.id;
+      return session;
+    },
+  },
   pages: {
     signIn: "/login",
   },

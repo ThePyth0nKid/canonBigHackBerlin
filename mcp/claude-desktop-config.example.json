@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "canon": {
+      "command": "npx",
+      "args": ["tsx", "/Users/nelsonmehlis/Desktop/canon/mcp/canon-mcp.ts"],
+      "env": {}
+    }
+  }
+}

@@ -10,8 +10,17 @@ export async function AikidoRepoBanner() {
   try {
     banner = await getRepoBanner();
   } catch {
-    // Network blip → render a muted fallback rather than failing the page.
-    return null;
+    // Network blip → render a muted offline pill rather than vanishing.
+    return (
+      <div className="flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-4 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-950">
+        <span
+          className="inline-block h-2 w-2 rounded-full bg-zinc-400"
+          aria-hidden
+        />
+        <span className="font-mono text-zinc-500">aikido</span>
+        <span className="text-zinc-400">offline</span>
+      </div>
+    );
   }
 
   const ok = banner.totalIssues === 0;

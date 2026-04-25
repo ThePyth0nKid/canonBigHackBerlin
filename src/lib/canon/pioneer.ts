@@ -141,11 +141,378 @@ export async function extractFactsFromChunks(
     const blocks = Array.isArray(resp.result) ? resp.result : [resp.result];
 
     batch.forEach((chunk, idx) => {
-      const draft = blockToDraft(blocks[idx], chunk);
-      if (draft) drafts.push(draft);
+      const raw = blockToDraft(blocks[idx], chunk);
+      const cleaned = postProcessDraft(raw, chunk);
+      for (const d of cleaned) drafts.push(d);
     });
   }
   return drafts;
+}
+
+/* -------------------------------------------------------------------------- *
+ * Post-processing layer
+ *
+ * GLiNER-2 spans are noisy: it confuses metric_value with metric_key, attaches
+ * facts to whichever entity is named loudest in the chunk, and lets timestamp-
+ * shaped strings leak into the schema. The rules below clean the raw draft
+ * into 0, 1, or 2 demo-grade FactDrafts.
+ * -------------------------------------------------------------------------- */
+
+/** Metrics that always belong to the home org (Northwind in the demo). */
+const HOUSE_METRICS = new Set([
+  'mrr',
+  'arr',
+  'pipeline',
+  'forecast',
+  'growth',
+  'headcount',
+]);
+
+/** Metrics that always belong to a specific customer, never the home org. */
+const CUSTOMER_METRICS = new Set([
+  'seats',
+  'acv',
+  'renewal_date',
+  'billing_cycle',
+  'churn',
+  'per_seat_price',
+]);
+
+/** Metric keys that require a digit somewhere in the value. */
+const NUMERIC_METRICS = new Set([
+  'mrr',
+  'arr',
+  'acv',
+  'seats',
+  'pipeline',
+  'forecast',
+  'growth',
+  'headcount',
+  'per_seat_price',
+  'churn',
+]);
+
+const KNOWN_CUSTOMERS = ['acme', 'techco', 'globex', 'initech', 'umbrella', 'soylent'];
+
+/** "q1_2026", "q4_2025", "2026", or bare "q1" — junk metric keys that are really period labels. */
+const PERIOD_KEY_RE = /^(q[1-4](_?20\d{2})?|20\d{2})$/i;
+
+/** Final whitelist — drafts whose metricKey isn't here get dropped. */
+const ALLOWED_METRIC_KEYS = new Set([
+  'mrr',
+  'arr',
+  'acv',
+  'seats',
+  'renewal_date',
+  'pipeline',
+  'churn',
+  'growth',
+  'forecast',
+  'per_seat_price',
+  'billing_cycle',
+  'headcount',
+]);
+
+/** Match "<N> seats" / "<N>-seat" anywhere in the chunk. */
+const SEATS_PATTERN = /\b(\d{1,4})\s*-?\s*seats?\b/i;
+
+/** Match "€<N>k?" amounts; optional k/m suffix only if word-boundary follows. */
+const MONEY_PATTERN = /€\s*([\d.,]+(?:\s*[km](?=\s|$|[^a-z]))?)/i;
+
+/** Match "<N> FTE" / "<N>-person team". */
+const FTE_PATTERN = /\b(\d{1,4})\s*(?:fte|fulltime|full-time)\b|\b(\d{1,4})-person\b/i;
+
+/**
+ * Clean a Pioneer draft. Returns:
+ *   []    — drop noise
+ *   [d]   — usual case
+ *   [a,b] — split (TechCo: seats + churn from one chunk)
+ */
+function postProcessDraft(draft: FactDraft | null, chunk: Chunk): FactDraft[] {
+  if (!draft) return [];
+
+  const text = chunk.text;
+  const lc = text.toLowerCase();
+  const customers = detectCustomersInText(lc);
+
+  let metricKey = draft.metric?.key ?? null;
+  let metricValue = draft.metric?.value ?? '';
+  let metricUnit = draft.metric?.unit;
+  let entity = draft.entity;
+
+  // (c) Drop time-period metric keys outright.
+  if (metricKey && PERIOD_KEY_RE.test(metricKey.replace(/\s+/g, '_'))) {
+    return [];
+  }
+
+  // (c-bis) Drop when metric_value is itself a time period label.
+  if (/^q[1-4]\s*20\d{2}$/i.test(metricValue.trim())) {
+    return [];
+  }
+
+  // Drop multiplier-style values like "3.7x" — never a real metric for the demo.
+  if (/^\d+(\.\d+)?x$/i.test(metricValue.trim())) {
+    return [];
+  }
+
+  const seatsMatch = text.match(SEATS_PATTERN);
+  const fteMatch = text.match(FTE_PATTERN);
+  const isChurnContext = /\b(churn|cancell|mrr lost|mrr loss|seats?\s+gek|gek[uü]ndigt)\b/i.test(
+    text,
+  );
+
+  // === Strong rerouting rules (fire BEFORE entity correction) ============= //
+
+  // (e) Customer-churn line — "12 seats × €200/mo = €2,400 MRR lost".
+  // Conservative: only fire when the chunk has a strong churn cue AND an
+  // explicit "MRR lost" / "lost" euro amount. Emits churn + seats drafts as
+  // ADDITIONS — the original draft is reprocessed afterward.
+  const strongChurnCue =
+    /\b(churning|churned|cancellation|mrr\s+lost|seats?\s+gek|gek[uü]ndigt|competitive\s+loss)\b/i.exec(
+      text,
+    );
+  const additions: FactDraft[] = [];
+  if (strongChurnCue) {
+    const onlyCustomers = customers.filter((c) => c !== 'northwind');
+    if (onlyCustomers.length > 0) {
+      const customer = nearestCustomer(
+        text,
+        lc,
+        strongChurnCue.index,
+        onlyCustomers,
+      );
+      // Euro amount that's explicitly tagged as "MRR lost" or follows "lost".
+      const lostMatch =
+        text.match(/€\s*([\d.,]+\s*k?)(?=\s*(?:mrr\s+lost|\s+lost\b))/i) ??
+        text.match(/mrr\s+lost[^€]*€\s*([\d.,]+\s*k?)/i) ??
+        text.match(/lost[^€]{0,40}€\s*([\d.,]+\s*k?)/i) ??
+        // "12 seats, €2,400 MRR" pattern (PDF risk slide)
+        text.match(/seats?,\s*€\s*([\d.,]+\s*k?)\s*mrr/i);
+      const seatN = seatsMatch?.[1];
+      if (lostMatch) {
+        const n = normalizeMoneyValue(`€${lostMatch[1].trim()}`, '/mo');
+        additions.push({
+          ...draft,
+          entity: customer,
+          metric: { key: 'churn', value: n.value, unit: n.unit },
+          sourceRef: `${draft.sourceRef}#churn`,
+        });
+      }
+      if (seatN) {
+        additions.push({
+          ...draft,
+          entity: customer,
+          metric: { key: 'seats', value: seatN, unit: 'seats' },
+          sourceRef: `${draft.sourceRef}#seats`,
+        });
+      }
+    }
+  }
+
+  // (f) FTE / headcount — "18 FTE", "10-person team". Always northwind.
+  if (fteMatch) {
+    return [
+      {
+        ...draft,
+        entity: 'northwind',
+        metric: {
+          key: 'headcount',
+          value: (fteMatch[1] ?? fteMatch[2] ?? '').trim(),
+          unit: 'FTE',
+        },
+      },
+    ];
+  }
+
+  // (d) Seats normalization: chunk has "<N> seats" + a customer in scope.
+  // Don't fire when the chunk also describes ACV/per-seat-price/renewal —
+  // Pioneer's existing extraction is more reliable for those.
+  if (
+    seatsMatch &&
+    customers.some((c) => c !== 'northwind') &&
+    metricKey !== 'per_seat_price' &&
+    metricKey !== 'acv' &&
+    metricKey !== 'renewal_date' &&
+    metricKey !== 'billing_cycle'
+  ) {
+    const onlyCustomers = customers.filter((c) => c !== 'northwind');
+    const customer = nearestCustomer(text, lc, seatsMatch.index ?? 0, onlyCustomers);
+    entity = customer;
+    metricKey = 'seats';
+    metricValue = seatsMatch[1];
+    metricUnit = 'seats';
+  }
+
+  // Email-subject seat hedge: "could come in at 40", "early sizing 40 seats"
+  // when chunk header mentions a customer. Use a looser pattern.
+  if (
+    !seatsMatch &&
+    metricKey !== 'seats' &&
+    customers.some((c) => c !== 'northwind') &&
+    /\b(seat|seats|sizing)\b/i.test(text)
+  ) {
+    const looseSeat = text.match(/\b(?:at|around|about|of|to|sizing)\s+(\d{1,3})\b/i);
+    if (looseSeat) {
+      const onlyCustomers = customers.filter((c) => c !== 'northwind');
+      entity = onlyCustomers[0];
+      metricKey = 'seats';
+      metricValue = looseSeat[1];
+      metricUnit = 'seats';
+    }
+  }
+
+  // === Whitelist gate ====================================================== //
+  if (!metricKey || !ALLOWED_METRIC_KEYS.has(metricKey)) {
+    return [];
+  }
+
+  // (b) Numeric metrics require a digit in value.
+  if (NUMERIC_METRICS.has(metricKey) && !/\d/.test(metricValue)) {
+    return [];
+  }
+
+  // === Entity correction by metric kind ==================================== //
+
+  if (HOUSE_METRICS.has(metricKey)) {
+    // House metric on a customer — pull back to northwind.
+    if (KNOWN_CUSTOMERS.includes(entity)) {
+      entity = 'northwind';
+    }
+  } else if (CUSTOMER_METRICS.has(metricKey)) {
+    // Customer metric — must be a real customer.
+    if (entity === 'northwind' || !KNOWN_CUSTOMERS.includes(entity)) {
+      const onlyCustomers = customers.filter((c) => c !== 'northwind');
+      if (onlyCustomers.length === 0) return [];
+      entity = onlyCustomers[0];
+    }
+  }
+
+  // === Drop pipeline noise ================================================ //
+  // "3 logos in procurement", "3 new logos" — pipeline unit "logos" not euros.
+  if (metricKey === 'pipeline' && /\b(logos?|deals?)\b/i.test(metricUnit ?? '')) {
+    return [];
+  }
+  if (metricKey === 'pipeline' && !/[€$]|\d{3,}/.test(metricValue)) {
+    return [];
+  }
+
+  // === Unit / value normalization ========================================= //
+  const norm = normalizeMoneyValue(metricValue, metricUnit);
+  metricValue = norm.value;
+  metricUnit = norm.unit;
+
+  if (NUMERIC_METRICS.has(metricKey) && !/\d/.test(metricValue)) {
+    return [];
+  }
+
+  if (!metricValue) return [];
+
+  return [
+    {
+      ...draft,
+      entity,
+      metric: { key: metricKey, value: metricValue, unit: metricUnit },
+    },
+  ];
+}
+
+/** Return the customer slugs (plus 'northwind') named in the chunk text. */
+function detectCustomersInText(lc: string): string[] {
+  const found: string[] = [];
+  for (const slug of [...KNOWN_CUSTOMERS, 'northwind']) {
+    const aliases = ENTITY_ALIASES[slug] ?? [slug];
+    for (const a of aliases) {
+      if (lc.includes(a.toLowerCase())) {
+        if (!found.includes(slug)) found.push(slug);
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Pick the customer whose name appears most-recently BEFORE the given offset
+ * (preferred — labels typically come before their values). If no customer
+ * appears before, fall back to the nearest one anywhere.
+ */
+function nearestCustomer(
+  text: string,
+  lc: string,
+  anchor: number,
+  candidates: string[],
+): string {
+  let bestBefore: string | null = null;
+  let bestBeforePos = -1;
+  let bestAny: string | null = null;
+  let bestAnyDist = Number.POSITIVE_INFINITY;
+  for (const c of candidates) {
+    if (c === 'northwind') continue;
+    const aliases = ENTITY_ALIASES[c] ?? [c];
+    for (const a of aliases) {
+      const lcA = a.toLowerCase();
+      // Find the last occurrence at or before anchor.
+      const before = lc.lastIndexOf(lcA, anchor);
+      if (before >= 0 && before > bestBeforePos) {
+        bestBeforePos = before;
+        bestBefore = c;
+      }
+      const any = lc.indexOf(lcA);
+      if (any >= 0) {
+        const d = Math.abs(any - anchor);
+        if (d < bestAnyDist) {
+          bestAnyDist = d;
+          bestAny = c;
+        }
+      }
+    }
+  }
+  return bestBefore ?? bestAny ?? candidates[0];
+}
+
+/**
+ * Expand "127k" → "127000", "€2.4k" → "€2400", strip trailing "/mo" into unit.
+ * Leaves dates and percentages alone.
+ */
+function normalizeMoneyValue(
+  value: string,
+  unit: string | undefined,
+): { value: string; unit: string | undefined } {
+  let v = value.trim();
+  let u = unit;
+
+  // Strip "/mo" or "/yr" suffix into unit.
+  const slashMatch = v.match(/(\/(?:mo|yr|month|year))\s*$/i);
+  if (slashMatch) {
+    v = v.slice(0, slashMatch.index).trim();
+    u = u ?? slashMatch[1].toLowerCase();
+  }
+
+  // Expand "<num>k" / "<num>m" forms when the value is purely currency-shaped.
+  // Skip dates and percentages.
+  if (/^\d{4}-\d{2}-\d{2}/.test(v)) return { value: v, unit: u };
+  if (/%$/.test(v)) return { value: v, unit: u };
+
+  // "127k" → 127000. Require k/m to be the LAST char of the value, not just
+  // a word-boundary letter — otherwise "127,000 MRR" would normalize as "M".
+  const kMatch = v.match(/^€?\s*([\d.,]+)\s*k$/i);
+  if (kMatch) {
+    const n = Number(kMatch[1].replace(/,/g, ''));
+    if (Number.isFinite(n)) {
+      const expanded = Math.round(n * 1000).toString();
+      v = v.startsWith('€') ? `€${expanded}` : expanded;
+    }
+  }
+  const mMatch = v.match(/^€?\s*([\d.,]+)\s*m$/i);
+  if (mMatch && !kMatch) {
+    const n = Number(mMatch[1].replace(/,/g, ''));
+    if (Number.isFinite(n)) {
+      const expanded = Math.round(n * 1_000_000).toString();
+      v = v.startsWith('€') ? `€${expanded}` : expanded;
+    }
+  }
+
+  return { value: v, unit: u };
 }
 
 function blockToDraft(block: RawResultBlock | undefined, chunk: Chunk): FactDraft | null {
