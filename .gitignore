@@ -10,3 +10,4 @@ tsconfig.tsbuildinfo
 
 # Private learning / NotebookLM source material — never publish
 docs-private/
+demo/qontext/
