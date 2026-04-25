@@ -282,10 +282,11 @@ export async function loadQontextSample(
 }
 
 /* -------------------------------------------------------------------------- *
- * Record types
+ * Record types — exported so the live-upload route can reuse the same
+ * typed mappers when the user drops a Qontext-shaped JSON file in.
  * -------------------------------------------------------------------------- */
 
-interface ClientRecord {
+export interface ClientRecord {
   client_id: string;
   business_name: string;
   industry?: string;
@@ -300,7 +301,7 @@ interface ClientRecord {
   engagement_value?: string;
 }
 
-interface VendorRecord {
+export interface VendorRecord {
   client_id: string;
   business_name: string;
   industry?: string;
@@ -312,19 +313,19 @@ interface VendorRecord {
   management_representative_employee?: string;
 }
 
-interface CustomerRecord {
+export interface CustomerRecord {
   customer_id: string;
   customer_name: string;
   invoice_paths?: string;
 }
 
-interface EmployeeRecord {
+export interface EmployeeRecord {
   index?: string;
   category?: string;
   description?: string;
 }
 
-interface EmailRecord {
+export interface EmailRecord {
   email_id: string;
   thread_id?: string;
   date: string;
@@ -337,7 +338,7 @@ interface EmailRecord {
   category?: string;
 }
 
-interface ConversationRecord {
+export interface ConversationRecord {
   conversation_id: string;
   sender_emp_id?: string;
   recipient_emp_id?: string;
@@ -345,14 +346,14 @@ interface ConversationRecord {
   text: string;
 }
 
-interface PostRecord {
+export interface PostRecord {
   Title: string;
   Post: string;
   emp_id?: string;
   author?: string;
 }
 
-interface ItTicketRecord {
+export interface ItTicketRecord {
   id: string;
   priority?: string;
   raised_by_emp_id?: string;
@@ -366,7 +367,7 @@ interface ItTicketRecord {
  * Direct converters
  * -------------------------------------------------------------------------- */
 
-function clientToDrafts(c: ClientRecord): FactDraft[] {
+export function clientToDrafts(c: ClientRecord): FactDraft[] {
   const slug = clientSlug(c.business_name);
   const observed = parseDateOrNow(c.onboarding_date);
   const ref = `qontext:client:${c.client_id}`;
@@ -435,7 +436,7 @@ function clientToDrafts(c: ClientRecord): FactDraft[] {
   return drafts;
 }
 
-function vendorToDrafts(v: VendorRecord): FactDraft[] {
+export function vendorToDrafts(v: VendorRecord): FactDraft[] {
   const slug = clientSlug(v.business_name);
   const observed = parseDateOrNow(v.onboarding_date);
   const ref = `qontext:vendor:${v.client_id}`;
@@ -478,7 +479,7 @@ function vendorToDrafts(v: VendorRecord): FactDraft[] {
   return drafts;
 }
 
-function customerToDrafts(c: CustomerRecord): FactDraft[] {
+export function customerToDrafts(c: CustomerRecord): FactDraft[] {
   const slug = clientSlug(c.customer_name);
   const ref = `qontext:customer:${c.customer_id}`;
   const observed = new Date().toISOString();
@@ -494,7 +495,7 @@ function customerToDrafts(c: CustomerRecord): FactDraft[] {
   ];
 }
 
-function employeeToDrafts(e: EmployeeRecord): FactDraft[] {
+export function employeeToDrafts(e: EmployeeRecord): FactDraft[] {
   const desc = (e.description ?? '').slice(0, 240);
   // Find the person's name from the description (typical first-sentence pattern).
   const nameMatch = desc.match(/^([A-Z][a-z]+ [A-Z][a-z]+)/);
@@ -514,7 +515,7 @@ function employeeToDrafts(e: EmployeeRecord): FactDraft[] {
   ];
 }
 
-function postToDrafts(p: PostRecord): FactDraft[] {
+export function postToDrafts(p: PostRecord): FactDraft[] {
   // Each post is its own fact, not a competing claim of one global
   // 'social_post' metric. Emit as a loose fact (no metric key) so the
   // conflict detector doesn't group them as a fake N-way conflict.
@@ -530,7 +531,7 @@ function postToDrafts(p: PostRecord): FactDraft[] {
   ];
 }
 
-function itTicketToDrafts(t: ItTicketRecord): FactDraft[] {
+export function itTicketToDrafts(t: ItTicketRecord): FactDraft[] {
   // Each ticket emits two facts: one about the raiser (emp_id of the
   // user reporting the issue), one about the assignee (the IT person
   // who resolved it). This creates natural cross-source links — the
@@ -615,7 +616,7 @@ async function loadPolicyPdfChunks(max: number): Promise<Chunk[]> {
  * Pipeline-via-Pioneer converters
  * -------------------------------------------------------------------------- */
 
-function emailToChunks(e: EmailRecord): Chunk[] {
+export function emailToChunks(e: EmailRecord): Chunk[] {
   // Each email = 1 chunk. Subject + first 600 chars of body.
   const text = `${e.subject}. ${(e.body ?? '').replace(/\s+/g, ' ').slice(0, 600)}`;
   return [
@@ -629,7 +630,7 @@ function emailToChunks(e: EmailRecord): Chunk[] {
   ];
 }
 
-function conversationToChunks(c: ConversationRecord): Chunk[] {
+export function conversationToChunks(c: ConversationRecord): Chunk[] {
   const text = (c.text ?? '').replace(/\s+/g, ' ').slice(0, 800);
   return [
     {
@@ -662,11 +663,11 @@ function pickSample<T>(arr: T[], n: number): T[] {
   return out;
 }
 
-function clientSlug(name: string | undefined): string {
+export function clientSlug(name: string | undefined): string {
   return slugify(name ?? 'unknown').slice(0, 32);
 }
 
-function slugify(s: string): string {
+export function slugify(s: string): string {
   return s
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')

@@ -32,7 +32,22 @@ export interface PipelineOutcome {
 
 export type PipelineProgress =
   | { phase: 'audit'; done: number; total: number }
-  | { phase: 'sign'; done: number; total: number; entity: string };
+  | {
+      phase: 'sign';
+      done: number;
+      total: number;
+      entity: string;
+      /** Populated after the row is signed + persisted. Carries the per-fact
+       *  detail the live-ingest UI uses to render streaming rows. */
+      fact?: {
+        factId: string;
+        claim: string;
+        sourceRef: string;
+        status: PipelineStatus;
+        eventHash: string;
+        notes?: string;
+      };
+    };
 
 export interface PipelineRunInput {
   userId: string;
@@ -183,6 +198,14 @@ export async function runPipeline(input: PipelineRunInput): Promise<PipelineRunR
         done: i + 1,
         total: drafts.length,
         entity: draft.entity,
+        fact: {
+          factId,
+          claim: claimToSign,
+          sourceRef: draft.sourceRef,
+          status: decision.status,
+          eventHash: signRes.eventHash,
+          notes: decision.notes,
+        },
       });
     }
   } finally {

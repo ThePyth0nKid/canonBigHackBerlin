@@ -14,7 +14,7 @@ import { SourcePill } from './_components/source-pill';
 import { AikidoRepoBanner } from './_components/aikido-banner';
 import { SyncButton } from './_components/sync-button';
 import { WorkspaceSwitcher } from './_components/workspace-switcher';
-import { IngestQontextButton } from './_components/ingest-qontext-button';
+import { FileDropIngest } from './_components/file-drop-ingest';
 
 export const dynamic = 'force-dynamic';
 
@@ -98,12 +98,12 @@ export default async function WorkspacePage({
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-900">
             <AikidoRepoBanner />
-            {activeWorkspace === 'northwind' ? (
-              <SyncButton />
-            ) : (
-              <IngestQontextButton />
-            )}
+            {activeWorkspace === 'northwind' && <SyncButton />}
           </div>
+
+          {activeWorkspace !== 'northwind' && (
+            <FileDropIngest workspace={activeWorkspace as 'inazuma'} />
+          )}
         </header>
 
         <Suspense
@@ -353,7 +353,10 @@ function MetricRow({ entity, metric }: { entity: string; metric: MetricGroup }) 
   );
 
   return (
-    <div className="group flex flex-wrap items-start justify-between gap-6 px-6 py-5 transition-colors hover:bg-zinc-50/60 dark:hover:bg-zinc-900/40">
+    <div
+      data-conflict-anchor={metric.needsHumanResolve ? '' : undefined}
+      className="group flex flex-wrap items-start justify-between gap-6 px-6 py-5 transition-colors hover:bg-zinc-50/60 dark:hover:bg-zinc-900/40"
+    >
       <div className="min-w-0 flex-1">
         {/* eyebrow row */}
         <div className="flex items-center gap-2.5">
