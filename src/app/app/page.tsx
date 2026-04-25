@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import { auth, signOut } from '@/auth';
 import { redirect } from 'next/navigation';
 import { prisma } from '@/lib/prisma';
@@ -45,8 +46,6 @@ export default async function WorkspacePage({
     badges[w.slug] = c ? `${c._count._all}` : '0';
   }
 
-  const land = await loadFactLandscape(userId, activeWorkspace);
-  const empty = land.entities.length === 0;
   const wsMeta =
     WORKSPACES.find((w) => w.slug === activeWorkspace) ?? WORKSPACES[0];
 
@@ -97,40 +96,6 @@ export default async function WorkspacePage({
             )}
           </div>
 
-          {!empty && (
-            <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 font-mono text-[11px] uppercase tracking-[0.12em] text-zinc-500">
-              <Stat label="active facts" value={land.totalActive} />
-              <span className="text-zinc-300 dark:text-zinc-700">·</span>
-              <Stat label="sources" value={land.distinctSources} />
-              <span className="text-zinc-300 dark:text-zinc-700">·</span>
-              <Stat
-                label={`conflict${land.unresolvedConflicts === 1 ? '' : 's'}`}
-                value={land.unresolvedConflicts}
-                tone={land.unresolvedConflicts > 0 ? 'amber' : 'default'}
-              />
-              {land.totalSuperseded > 0 && (
-                <>
-                  <span className="text-zinc-300 dark:text-zinc-700">·</span>
-                  <Stat
-                    label="superseded"
-                    value={land.totalSuperseded}
-                    tone="muted"
-                  />
-                </>
-              )}
-              {land.totalRedacted > 0 && (
-                <>
-                  <span className="text-zinc-300 dark:text-zinc-700">·</span>
-                  <Stat
-                    label="redacted"
-                    value={land.totalRedacted}
-                    tone="muted"
-                  />
-                </>
-              )}
-            </div>
-          )}
-
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-900">
             <AikidoRepoBanner />
             {activeWorkspace === 'northwind' ? (
@@ -141,13 +106,95 @@ export default async function WorkspacePage({
           </div>
         </header>
 
-        {empty ? (
-          <EmptyState workspace={activeWorkspace} />
-        ) : (
-          <Landscape entities={land.entities} workspace={activeWorkspace} />
-        )}
+        <Suspense
+          key={activeWorkspace}
+          fallback={<LandscapeSkeleton workspace={activeWorkspace} />}
+        >
+          <LandscapeBody userId={userId} workspace={activeWorkspace} />
+        </Suspense>
       </div>
     </main>
+  );
+}
+
+async function LandscapeBody({
+  userId,
+  workspace,
+}: {
+  userId: string;
+  workspace: string;
+}) {
+  const land = await loadFactLandscape(userId, workspace);
+  const empty = land.entities.length === 0;
+
+  return (
+    <>
+      {!empty && (
+        <div className="mt-5 flex flex-wrap items-baseline gap-x-5 gap-y-1 font-mono text-[11px] uppercase tracking-[0.12em] text-zinc-500">
+          <Stat label="active facts" value={land.totalActive} />
+          <span className="text-zinc-300 dark:text-zinc-700">·</span>
+          <Stat label="sources" value={land.distinctSources} />
+          <span className="text-zinc-300 dark:text-zinc-700">·</span>
+          <Stat
+            label={`conflict${land.unresolvedConflicts === 1 ? '' : 's'}`}
+            value={land.unresolvedConflicts}
+            tone={land.unresolvedConflicts > 0 ? 'amber' : 'default'}
+          />
+          {land.totalSuperseded > 0 && (
+            <>
+              <span className="text-zinc-300 dark:text-zinc-700">·</span>
+              <Stat
+                label="superseded"
+                value={land.totalSuperseded}
+                tone="muted"
+              />
+            </>
+          )}
+          {land.totalRedacted > 0 && (
+            <>
+              <span className="text-zinc-300 dark:text-zinc-700">·</span>
+              <Stat label="redacted" value={land.totalRedacted} tone="muted" />
+            </>
+          )}
+        </div>
+      )}
+
+      {empty ? (
+        <EmptyState workspace={workspace} />
+      ) : (
+        <Landscape entities={land.entities} workspace={workspace} />
+      )}
+    </>
+  );
+}
+
+function LandscapeSkeleton({ workspace }: { workspace: string }) {
+  const rows = workspace === 'inazuma' ? 8 : 4;
+  return (
+    <div className="mt-5 animate-pulse">
+      <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 font-mono text-[11px] uppercase tracking-[0.12em] text-zinc-400">
+        <span>loading {workspace === 'inazuma' ? 'qontext dataset' : 'workspace'}…</span>
+      </div>
+      <div className="mt-10 space-y-12">
+        {Array.from({ length: rows }).map((_, i) => (
+          <section key={i}>
+            <div className="flex items-baseline justify-between gap-3">
+              <div className="h-4 w-40 rounded bg-zinc-200 dark:bg-zinc-800" />
+              <div className="h-3 w-12 rounded bg-zinc-100 dark:bg-zinc-900" />
+            </div>
+            <div className="mt-3 divide-y divide-zinc-200 overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:divide-zinc-800 dark:border-zinc-800 dark:bg-zinc-950">
+              {Array.from({ length: 3 }).map((__, j) => (
+                <div key={j} className="px-6 py-5">
+                  <div className="h-3 w-24 rounded bg-zinc-100 dark:bg-zinc-900" />
+                  <div className="mt-3 h-7 w-32 rounded bg-zinc-200 dark:bg-zinc-800" />
+                  <div className="mt-3 h-3 w-48 rounded bg-zinc-100 dark:bg-zinc-900" />
+                </div>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
   );
 }
 
