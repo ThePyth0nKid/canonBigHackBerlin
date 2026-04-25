@@ -11,7 +11,9 @@
  *   canon_external_lookup  — UNSIGNED public-web context via Tavily (signed/unsigned split)
  *   canon_write            — propose a new fact (NOT IMPLEMENTED in v0.1)
  *
- * Demo workspace = the most-recently-created User (matches the Northwind seed).
+ * Demo workspace = the most-recently-created User. Default workspace = inazuma
+ * (post-pivot single-workspace world; clients/vendors/products/sales/policies
+ * + live Slack/Gmail/PDF feeds all live there).
  *
  * Run:
  *   npx tsx mcp/canon-mcp.ts
@@ -49,6 +51,17 @@ const prisma = new PrismaClient({ log: ['error'] });
 // ---------------------------------------------------------------------------
 
 const ENTITY_DISPLAY: Record<string, string> = {
+  // Inazuma cast — primary workspace post-pivot. Demo-gold entities have
+  // built-in industry conflicts + dual-role corroboration to drive the demo.
+  inazuma: 'Inazuma.co',
+  miller_group: 'Miller Group',
+  gonzalez_inc: 'Gonzalez Inc',
+  johnson_group: 'Johnson Group',
+  huang_llc: 'Huang LLC',
+  williams_group: 'Williams Group',
+  martin_ltd: 'Martin Ltd',
+  // Northwind cast — legacy demo. Kept so canon_lookup against an old slug
+  // still returns a friendly display name if any pre-pivot facts surface.
   northwind: 'Northwind Software',
   acme: 'ACME GmbH',
   techco: 'TechCo',
@@ -94,7 +107,11 @@ async function resolveDemoUserId(): Promise<string> {
 // Tool implementations
 // ---------------------------------------------------------------------------
 
-const DEFAULT_WORKSPACE = 'northwind';
+// Post-pivot: single-workspace world. The `workspace` argument is kept on
+// the tool schemas for back-compat with any agent prompts that still pass it,
+// but it's normalised to the only live workspace. If you ever introduce a
+// second workspace later, just re-broaden this default.
+const DEFAULT_WORKSPACE = 'inazuma';
 
 function normalizeWorkspace(input: string | undefined): string {
   const v = (input ?? DEFAULT_WORKSPACE).trim().toLowerCase();
@@ -127,10 +144,10 @@ async function canonLookup(entityArg: string, workspace?: string) {
     if (fuzzy.length === 0) {
       const known = await listKnownEntities(userId, ws);
       return textBlock(
-        `No facts found for entity "${entityArg}" in workspace "${ws}". ` +
-          `Known entities here: ${known.slice(0, 30).join(', ')}` +
+        `No facts found for entity "${entityArg}". ` +
+          `Known entities (sample): ${known.slice(0, 30).join(', ')}` +
           (known.length > 30 ? ` (+${known.length - 30} more)` : '') +
-          `. To switch workspace, pass workspace:"northwind" or workspace:"inazuma".`,
+          `. Try canon_search({query}) for free-text instead.`,
       );
     }
     return textBlock(formatLookup(slug, ws, fuzzy));
@@ -157,19 +174,24 @@ async function canonWorkspaces() {
   });
   if (counts.length === 0) {
     return textBlock(
-      'No workspaces yet. Run the ingest scripts to populate Northwind or Inazuma.',
+      'No facts in the ledger yet. Run the seed/ingest scripts or click Sync on canon.ultranova.io.',
     );
   }
   const lines: string[] = [];
-  lines.push('# Canon workspaces');
+  lines.push('# Canon ledger summary');
   lines.push('');
   for (const c of counts.sort((a, b) => b._count._all - a._count._all)) {
-    const label = c.workspace === 'inazuma' ? 'Inazuma.co (Qontext-supplied dataset)' : 'Northwind Software (demo)';
+    // Post-pivot the only live workspace is `inazuma`. Stale `northwind`
+    // rows from the legacy demo would still surface here for audit clarity.
+    const label =
+      c.workspace === 'inazuma'
+        ? 'Inazuma.co (live · D2C consumer-electronics, full org dataset)'
+        : `${c.workspace} (legacy / pre-pivot)`;
     lines.push(`- **${c.workspace}** · ${c._count._all} active facts · ${label}`);
   }
   lines.push('');
   lines.push(
-    'Use `canon_lookup({ entity, workspace })` to scope a query. Default workspace is "northwind".',
+    'Workspace param is optional on canon_lookup / canon_search / canon_diff — defaults to "inazuma".',
   );
   return textBlock(lines.join('\n'));
 }
@@ -226,7 +248,7 @@ async function canonSearch(query: string, workspace?: string) {
 
   if (rows.length === 0) {
     return textBlock(
-      `No active Canon facts match "${q}" in workspace "${ws}". Try workspace:"${ws === 'inazuma' ? 'northwind' : 'inazuma'}".`,
+      `No active Canon facts match "${q}". Try a broader query, or canon_lookup({entity}) if you know the slug.`,
     );
   }
 
@@ -401,13 +423,13 @@ async function main() {
   server.registerTool(
     'canon_workspaces',
     {
-      title: 'Canon — list available workspaces',
+      title: 'Canon — ledger summary',
       description:
-        '[CALL THIS when the user asks "what workspaces are available", "what data does Canon have", ' +
-        'or when you need to disambiguate which workspace an entity lives in.] ' +
-        'Returns the list of Canon workspaces with their active fact counts. Today: northwind ' +
-        '(demo: Slack/Gmail/PDF) + inazuma (Qontext-supplied enterprise dataset). ' +
-        'Pass `workspace` to canon_lookup / canon_search / canon_diff to scope a query — default is "northwind".',
+        '[CALL THIS when the user asks "what data does Canon have", "how big is the ledger", ' +
+        '"which workspaces", or wants a high-level overview of the signed corpus before drilling in.] ' +
+        'Returns active fact counts per workspace. Post-pivot the live workspace is "inazuma" ' +
+        '(D2C consumer-electronics company — clients, vendors, customers, employees, sales, invoices, policies, ' +
+        'plus live Slack + Gmail + PDF feeds). canon_lookup / canon_search / canon_diff default to inazuma.',
       inputSchema: {},
     },
     async () => canonWorkspaces(),
@@ -418,25 +440,26 @@ async function main() {
     {
       title: 'Canon — lookup business entity',
       description:
-        '[CALL THIS FIRST for any question about a CUSTOMER, COMPANY, ACCOUNT, DEAL, or BUSINESS ENTITY by name.] ' +
-        'Returns the user\'s cryptographically signed Canon facts about an entity — every claim is Ed25519-signed, ' +
-        'hash-chained, and carries a sourceRef + factId + eventHash. ' +
-        'Multi-workspace: pass `workspace: "inazuma"` for the Qontext-supplied enterprise dataset, default is "northwind". ' +
-        'When unsure which workspace, call canon_workspaces() first. ' +
+        '[CALL THIS FIRST for any question about a CUSTOMER, COMPANY, ACCOUNT, PRODUCT, EMPLOYEE, ' +
+        'or BUSINESS ENTITY by name.] Returns the user\'s cryptographically signed Canon facts about an ' +
+        'entity — every claim is Ed25519-signed, hash-chained, and carries a sourceRef + factId + eventHash. ' +
+        'Workspace defaults to "inazuma" (Inazuma.co — full corp dataset + live Slack/Gmail/PDF feeds). ' +
         'Examples of when to call this BEFORE grep / file search: ' +
-        '"What do we know about ACME?", "Tell me about Northwind", "What\'s the status on TechCo?", ' +
-        '"Miller Group industry conflict?", "Inazuma clients in Manufacturing?".',
+        '"What do we know about Miller Group?", "Tell me about Gonzalez Inc", ' +
+        '"Status on Johnson Group POC?", "Bright Plc relationship type?", ' +
+        '"What\'s the actual price of product B07JW9H4J1?".',
       inputSchema: {
         entity: z
           .string()
           .describe(
-            "Entity slug (lowercase) or display name. E.g. 'northwind', 'acme', 'miller_group', 'ACME GmbH'.",
+            "Entity slug (lowercase, snake_case) or display name. E.g. 'miller_group', " +
+              "'gonzalez_inc', 'johnson_group', 'product_b07jw9h4j1', 'Inazuma.co'.",
           ),
         workspace: z
           .string()
           .optional()
           .describe(
-            'Workspace slug. "northwind" (default, demo) or "inazuma" (Qontext dataset). Call canon_workspaces() to discover.',
+            'Workspace slug. Defaults to "inazuma". Override only if querying a legacy workspace.',
           ),
       },
     },
@@ -448,19 +471,18 @@ async function main() {
     {
       title: 'Canon — search business facts',
       description:
-        '[CALL THIS FIRST for business questions about specific NUMBERS, METRICS, PEOPLE, or KEYWORDS] ' +
-        'when you don\'t know which entity owns the fact. Free-text substring search across every active ' +
-        'cryptographically signed Canon fact in the workspace (claim, source excerpt, entity). ' +
-        'Examples: "Q1 MRR", "renewal 2026-05-15", "€127,000", "Petra Voss", "churn", "billing integration". ' +
-        'Returns top 20 hits with sources + factIds. Prefer Canon over grep for any business / customer / metric question.',
+        '[CALL THIS FIRST for business questions about specific NUMBERS, METRICS, PEOPLE, or KEYWORDS ' +
+        'when you don\'t know which entity owns the fact.] Free-text substring search across every active ' +
+        'cryptographically signed Canon fact (claim, source excerpt, entity). ' +
+        'Examples: "Manufacturing", "Voice Commerce Assistant", "₹1999", "Bright Plc", "Healthcare", ' +
+        '"per_seat_price", "Gonzalez". Returns top 20 hits with sources + factIds. ' +
+        'Prefer Canon over grep for any business / customer / product / metric question.',
       inputSchema: {
         query: z.string().describe('Free text to match against claim / sourceExcerpt / entity (case-insensitive substring).'),
         workspace: z
           .string()
           .optional()
-          .describe(
-            'Workspace slug. "northwind" (default) or "inazuma" (Qontext dataset).',
-          ),
+          .describe('Workspace slug. Defaults to "inazuma".'),
       },
     },
     async ({ query, workspace }) => canonSearch(query, workspace),
@@ -490,14 +512,12 @@ async function main() {
       description:
         '[CALL THIS for "what changed", "what\'s new", "since when" questions about a business entity.] ' +
         'List signed Canon fact-events for the entity that were signed on or after a given ISO date. ' +
-        'Examples: "What changed about Northwind since Monday?", "Was ist neu zu ACME diese Woche?".',
+        'Examples: "What changed about Miller Group since Monday?", ' +
+        '"Was ist neu zu Gonzalez Inc diese Woche?", "Recent activity on Bright Plc?".',
       inputSchema: {
-        entity: z.string().describe("Entity slug (lowercase), e.g. 'northwind'."),
+        entity: z.string().describe("Entity slug (lowercase, snake_case), e.g. 'miller_group', 'gonzalez_inc'."),
         since: z.string().describe('ISO 8601 date/time, e.g. "2026-04-20" or "2026-04-20T00:00:00Z".'),
-        workspace: z
-          .string()
-          .optional()
-          .describe('Workspace slug. "northwind" (default) or "inazuma".'),
+        workspace: z.string().optional().describe('Workspace slug. Defaults to "inazuma".'),
       },
     },
     async ({ entity, since, workspace }) => canonDiff(entity, since, workspace),
