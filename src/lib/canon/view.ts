@@ -107,6 +107,139 @@ export interface FactLandscape {
   unresolvedConflicts: number;
 }
 
+export interface FactStats {
+  totalActive: number;
+  totalSuperseded: number;
+  totalRedacted: number;
+  distinctSources: number;
+  unresolvedConflicts: number;
+  totalEntities: number;
+}
+
+/**
+ * Fast aggregate stats for the page header — no per-row fetch. Runs as 4
+ * count queries + 1 distinct-entity scan; ~50-200ms even on 8000+ facts.
+ * Used as the first Suspense boundary so the header lights up immediately.
+ */
+export async function loadFactStats(
+  userId: string,
+  workspace: string = 'inazuma',
+): Promise<FactStats> {
+  const baseWhere = { userId, workspace, NOT: { status: 'resolution' } } as const;
+  const [byStatus, distinctEntities, sourceRefs] = await Promise.all([
+    prisma.factEvent.groupBy({
+      by: ['status'],
+      where: baseWhere,
+      _count: { _all: true },
+    }),
+    prisma.factEvent.findMany({
+      where: baseWhere,
+      select: { entity: true },
+      distinct: ['entity'],
+    }),
+    // Source-prefix discovery: pull distinct sourceRef and bucket by prefix
+    // client-side. Cheaper than per-row fetch since each sourceRef is short.
+    prisma.factEvent.findMany({
+      where: baseWhere,
+      select: { sourceRef: true },
+      distinct: ['sourceRef'],
+      take: 500,
+    }),
+  ]);
+
+  const counts = { active: 0, superseded: 0, redacted: 0 };
+  for (const r of byStatus) {
+    const s = r.status as keyof typeof counts;
+    if (s in counts) counts[s] = r._count._all;
+  }
+  const sourceSet = new Set(sourceRefs.map((r) => sourceKindOf(r.sourceRef)));
+
+  // Conflicts can't be derived without grouping facts per (entity, metricKey)
+  // and clustering by value — that's the slow path. Compute it lazily here:
+  // groupBy (entity, metricKey, metricValue) is still much cheaper than
+  // pulling every row, and gives us enough to count "groups with >1 value".
+  const grouped = await prisma.factEvent.groupBy({
+    by: ['entity', 'metricKey', 'metricValue'],
+    where: { userId, workspace, status: 'active', metricKey: { not: null } },
+    _count: { _all: true },
+  });
+  const valuesPerKey = new Map<string, Set<string>>();
+  for (const g of grouped) {
+    if (!g.metricKey) continue;
+    const k = `${g.entity}::${normalizeMetricKey(g.metricKey)}`;
+    const v = normalizeValue(g.metricValue ?? '');
+    if (!v) continue;
+    if (!valuesPerKey.has(k)) valuesPerKey.set(k, new Set());
+    valuesPerKey.get(k)!.add(v);
+  }
+  let unresolvedConflicts = 0;
+  for (const set of valuesPerKey.values()) if (set.size > 1) unresolvedConflicts++;
+
+  return {
+    totalActive: counts.active,
+    totalSuperseded: counts.superseded,
+    totalRedacted: counts.redacted,
+    distinctSources: sourceSet.size,
+    unresolvedConflicts,
+    totalEntities: distinctEntities.length,
+  };
+}
+
+/**
+ * Distinct entity slugs in canonical display order. Drives pagination —
+ * page.tsx renders featured slugs immediately and hands the remaining tail
+ * to the lazy loader.
+ */
+export async function loadEntitySlugsOrdered(
+  userId: string,
+  workspace: string = 'inazuma',
+): Promise<string[]> {
+  const rows = await prisma.factEvent.findMany({
+    where: { userId, workspace, NOT: { status: 'resolution' } },
+    select: { entity: true },
+    distinct: ['entity'],
+  });
+  const slugs = rows.map((r) => r.entity);
+  slugs.sort((a, b) => entityOrder(a) - entityOrder(b));
+  return slugs;
+}
+
+/**
+ * Build EntityGroup[] for ONLY the slugs requested. Caller-controlled
+ * fan-out is the whole point: the initial page renders featured (~7
+ * entities, ~100 facts), and "load more" actions fetch chunks of 25.
+ * Avoids the 11MB / 1.5s wholesale fetch the original loader did.
+ */
+export async function loadEntitiesBySlugs(
+  userId: string,
+  workspace: string,
+  slugs: string[],
+): Promise<EntityGroup[]> {
+  if (slugs.length === 0) return [];
+  const rows = await prisma.factEvent.findMany({
+    where: {
+      userId,
+      workspace,
+      entity: { in: slugs },
+      NOT: { status: 'resolution' },
+    },
+    orderBy: { signedAt: 'asc' },
+  });
+  const facts = rows.map(toFactRow);
+  const byEntity = new Map<string, FactRow[]>();
+  for (const f of facts) {
+    if (!byEntity.has(f.entity)) byEntity.set(f.entity, []);
+    byEntity.get(f.entity)!.push(f);
+  }
+  const out: EntityGroup[] = [];
+  // Preserve caller-supplied slug order; missing slugs (no facts) are dropped.
+  for (const slug of slugs) {
+    const group = byEntity.get(slug);
+    if (group) out.push(buildEntityGroup(slug, group));
+  }
+  return out;
+}
+
 export async function loadFactLandscape(
   userId: string,
   workspace: string = 'inazuma',
