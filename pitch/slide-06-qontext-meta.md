@@ -21,11 +21,11 @@
 
 - **RAG** halluziniert by similarity.
 - **Canon** proves provenance.
-- Recursive trust: Canon's own repo is Aikido-monitored — 0 issues, signed banner live.
+- Recursive trust: Aikido scant Canons eigenen Code. **3 gefunden, 3 triaged, HIGH gefixt.**
 
-## Speaker notes (≤90 words, ~13s)
+## Speaker notes (~14s, ~38 words)
 
-"Der Punkt für Qontext: wir konkurrieren nicht — wir feeden. Canon ist die signed-fact-source, Layer eins. Qontext ist der Context-Layer drüber. Mount Canon-MCP in fünf Minuten in Qontext, und Qontext serviert plötzlich kryptographisch beweisbare Facts an seinen Customer-Stack. RAG halluziniert by similarity — Canon proves provenance. Und ja: Canons eigenes Repo ist Aikido-monitored, null Issues, signiert. Recursive trust."
+"Der Punkt für Qontext: wir konkurrieren nicht — wir feeden. Canon ist signed-fact-source, Layer eins. Qontext mountet uns als MCP in fünf Minuten und serviert seinen Customer-Stack plötzlich kryptographisch beweisbare Facts. RAG halluziniert by similarity — Canon proves provenance. Und Aikido — der Layer drei in unserer Pipeline — scant unser eigenes Repo. Drei gefunden, drei triaged, einen high gefixt heute Nachmittag. Recursive trust ist nicht im Slide. Es nervt sogar."
 
 ## Stage cue
 
