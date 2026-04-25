@@ -114,12 +114,18 @@ export interface Chunk {
  * Run Pioneer over a batch of pre-chunked text and return FactDrafts.
  * Each chunk produces 0 or 1 drafts: 1 if Pioneer found a known canonical
  * entity, 0 otherwise (drift / noise gets filtered).
+ *
+ * Chunks are split per-sentence first — GLiNER-2 returns ONE fact per text,
+ * so multi-metric inputs (e.g. "Q1 €127k MRR. Up 23% YoY.") would otherwise
+ * lose half their metrics. Per-sentence chunking keeps each fact laser-clean.
  */
 export async function extractFactsFromChunks(
   chunks: Chunk[],
   opts?: { threshold?: number },
 ): Promise<FactDraft[]> {
-  const filtered = chunks.filter((c) => c.text.trim().length > 0);
+  const filtered = chunks
+    .flatMap(splitChunkPerSentence)
+    .filter((c) => c.text.trim().length > 0);
   if (filtered.length === 0) return [];
 
   const drafts: FactDraft[] = [];
@@ -144,9 +150,16 @@ export async function extractFactsFromChunks(
 
 function blockToDraft(block: RawResultBlock | undefined, chunk: Chunk): FactDraft | null {
   const row = block?.fact?.[0];
-  const metricKey = (row?.metric_key ?? '').toString().trim();
+  const metricKeyRaw = (row?.metric_key ?? '').toString().trim();
   const metricValue = (row?.metric_value ?? '').toString().trim();
   const metricUnit = (row?.metric_unit ?? '').toString().trim() || undefined;
+
+  // Pioneer often confuses numeric values into the metric_key field. Try to
+  // canonicalize against a known label set; if the span is itself numeric or
+  // unmappable, infer a key from the chunk text instead.
+  const metricKey =
+    canonicalizeMetricKey(metricKeyRaw) ?? inferMetricKeyFromText(chunk.text, metricValue);
+
   const metric =
     metricKey && metricValue
       ? { key: metricKey, value: metricValue, unit: metricUnit }
@@ -175,6 +188,61 @@ function blockToDraft(block: RawResultBlock | undefined, chunk: Chunk): FactDraf
   };
 }
 
+/** Canonical metric-key vocabulary for the Northwind demo. */
+const METRIC_ALIASES: Record<string, string[]> = {
+  mrr: ['mrr', 'monthly recurring revenue', 'q1 mrr', 'q2 mrr', 'monthly revenue'],
+  arr: ['arr', 'annual recurring revenue'],
+  acv: ['acv', 'annual contract value'],
+  seats: ['seats', 'seat count', 'licenses', 'users'],
+  renewal_date: ['renewal', 'renewal date', 'renewal effective', 'next renewal'],
+  pipeline: ['pipeline', 'q2 pipeline', 'weighted pipeline', 'pipeline weighted'],
+  churn: ['churn', 'churning', 'churned', 'mrr lost', 'mrr loss', 'cancellation'],
+  growth: ['growth', 'yoy growth', 'yoy', 'year over year'],
+  forecast: ['forecast', 'q1 forecast', 'feb forecast', 'february forecast'],
+  per_seat_price: ['per seat', 'per-seat price', 'per-seat', 'price per seat', '€/seat'],
+  billing_cycle: ['billing', 'billing cycle', 'annual billing'],
+};
+
+const METRIC_REVERSE: Map<string, string> = new Map(
+  Object.entries(METRIC_ALIASES).flatMap(([slug, aliases]) =>
+    aliases.map((a) => [a.toLowerCase(), slug] as const),
+  ),
+);
+
+const NUMERIC_LIKE = /^[\s\d.,€$£¥%\-+/]+$/;
+
+function canonicalizeMetricKey(raw: string): string | null {
+  if (!raw) return null;
+  const norm = raw.trim().toLowerCase().replace(/[.,;:!?]+$/, '');
+  if (!norm) return null;
+  if (NUMERIC_LIKE.test(norm)) return null;
+  if (METRIC_REVERSE.has(norm)) return METRIC_REVERSE.get(norm)!;
+  for (const [alias, slug] of METRIC_REVERSE) {
+    if (norm.includes(alias)) return slug;
+  }
+  // Unknown but non-numeric — keep the lowercased form as a soft slug.
+  return norm.replace(/\s+/g, '_').slice(0, 32);
+}
+
+/**
+ * Pioneer didn't give us a usable key. Walk the chunk text once and detect
+ * the strongest metric category present.
+ */
+function inferMetricKeyFromText(text: string, value: string): string | null {
+  const lc = text.toLowerCase();
+  if (/\bmrr\b/.test(lc)) return 'mrr';
+  if (/\barr\b/.test(lc)) return 'arr';
+  if (/\bacv\b/.test(lc)) return 'acv';
+  if (/\brenewal\b/.test(lc) && /\d{4}-\d{2}-\d{2}/.test(value)) return 'renewal_date';
+  if (/\bseats?\b/.test(lc)) return 'seats';
+  if (/\bpipeline\b/.test(lc)) return 'pipeline';
+  if (/\bchurn|cancellation\b/.test(lc)) return 'churn';
+  if (/\byoy\b|year[- ]over[- ]year/.test(lc) || /\d+\s*%/.test(value)) return 'growth';
+  if (/\bforecast\b/.test(lc)) return 'forecast';
+  if (/\bbilling\b/.test(lc)) return 'billing_cycle';
+  return null;
+}
+
 /** ISO-like date check: YYYY-MM-DD, YYYY-MM, or full ISO8601. */
 function isPlausibleIsoDate(s: string): boolean {
   if (!s) return false;
@@ -197,6 +265,28 @@ export function canonicalizeEntity(span: string): string | null {
 
 function oneLine(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Split a chunk's text into sentences and emit one sub-chunk per sentence,
+ * each with a unique sourceRef suffix so the chain still hashes distinctly.
+ * Drops trivially-short fragments (<25 chars) — those rarely carry a metric.
+ */
+function splitChunkPerSentence(chunk: Chunk): Chunk[] {
+  const sentences = chunk.text
+    .split(/(?<=[.!?])\s+(?=[A-Z€$£0-9])/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 25);
+
+  if (sentences.length <= 1) return [chunk];
+
+  return sentences.map((s, i) => ({
+    text: s,
+    sourceRef: `${chunk.sourceRef}#s${i}`,
+    observedAt: chunk.observedAt,
+    sourceExcerpt: s.slice(0, 240),
+    defaultEntity: chunk.defaultEntity,
+  }));
 }
 
 function clip(s: string, max: number): string {

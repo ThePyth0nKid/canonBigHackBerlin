@@ -59,6 +59,9 @@ model FactEvent {
   userId        String
   entity        String
   claim         String
+  metricKey     String?
+  metricValue   String?
+  metricUnit    String?
   sourceRef     String
   sourceExcerpt String?  @db.Text
   parentHash    String?
@@ -66,7 +69,10 @@ model FactEvent {
   coseSign1Hex  String   @db.Text
   signerPubkey  String
   signedAt      DateTime
+  observedAt    DateTime?
   status        String   @default("active")
+  /** Audit/scan side-channel: e.g. "redaction:secret:aws_access_key" or "audit:supersedes ..." */
+  notes         String?  @db.Text
   createdAt     DateTime @default(now())
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
