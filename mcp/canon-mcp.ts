@@ -37,14 +37,21 @@ loadDotenv({ path: resolve(__dirname, '..', '.env.local'), override: true, quiet
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { PrismaClient } from '../src/generated/prisma/client.js';
 import { searchExternal } from '../src/lib/canon/tavily.js';
+// Shared search lib — same retrieval+ranking the Ask-Canon UI uses, so
+// MCP agents and the in-app box give bit-identical results. Critical for
+// the demo claim "you can ask via UI OR via Claude Code MCP — same code".
+import { searchFacts as sharedSearchFacts } from '../src/lib/canon/search.js';
+// Use the same prisma singleton the Next.js app uses so both processes
+// (Next dev/prod + MCP server) don't each spawn their own pool inside the
+// same node instance when MCP delegates to shared libs.
+import { prisma } from '../src/lib/prisma.js';
 
-// ---------------------------------------------------------------------------
-// Prisma client (we instantiate locally instead of importing the Next-aware
-// singleton from src/lib/prisma.ts because this script runs outside Next).
-// ---------------------------------------------------------------------------
-const prisma = new PrismaClient({ log: ['error'] });
+// Prisma client comes from the shared @/lib/prisma singleton (imported
+// above). Originally MCP spun up its own PrismaClient — that was fine when
+// MCP was self-contained, but now that we share search/lookup code with the
+// Next app, two pools in the same node process is wasteful and fights for
+// connections. One singleton, one pool.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -298,25 +305,10 @@ async function canonSearch(query: string, workspace?: string) {
   const q = query.trim();
   if (!q) return errorBlock('query is required');
 
-  const rows = await prisma.factEvent.findMany({
-    where: {
-      userId,
-      workspace: ws,
-      status: 'active',
-      OR: [
-        { claim: { contains: q, mode: 'insensitive' } },
-        { sourceExcerpt: { contains: q, mode: 'insensitive' } },
-        { entity: { contains: q, mode: 'insensitive' } },
-      ],
-    },
-    orderBy: { signedAt: 'desc' },
-    take: 20,
-    select: {
-      id: true, entity: true, claim: true, sourceRef: true,
-      sourceExcerpt: true, signedAt: true, eventHash: true,
-      signerPubkey: true, parentHash: true,
-    },
-  });
+  // Delegated to the shared sharedSearchFacts() so this matches the
+  // Ask-Canon UI exactly: same tokenization, same entity-name boost,
+  // same scoring + ranking. If you ever change ranking, change it once.
+  const rows = await sharedSearchFacts(userId, q, { workspace: ws, limit: 20 });
 
   if (rows.length === 0) {
     return textBlock(

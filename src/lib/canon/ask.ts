@@ -15,7 +15,7 @@
  */
 
 import { GoogleGenAI, Type } from '@google/genai';
-import { prisma } from '@/lib/prisma';
+import { searchFacts } from './search';
 
 const MODEL = process.env.CANON_AUDIT_MODEL ?? 'gemini-2.5-flash';
 const TOP_K = 30;
@@ -82,82 +82,20 @@ const RESPONSE_SCHEMA = {
   required: ['answer', 'citedFactIds', 'confidence'],
 } as const;
 
-const STOPWORDS = new Set([
-  'the', 'a', 'an', 'of', 'in', 'on', 'at', 'for', 'to', 'is', 'are',
-  'was', 'were', 'be', 'been', 'and', 'or', 'but', 'by', 'with', 'from',
-  'as', 'about', 'this', 'that', 'these', 'those', 'it', 'its', 'has',
-  'have', 'had', 'do', 'does', 'did', 'what', 'who', 'when', 'where',
-  'why', 'how', 'which', 'whose', 'whom', 'tell', 'show', 'me', 'us',
-  'we', 'our', 'i', 'you', 'your',
-  // German stopwords for the bilingual demo audience.
-  'der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einer',
-  'eines', 'einem', 'einen', 'und', 'oder', 'aber', 'ist', 'sind',
-  'war', 'waren', 'was', 'wer', 'wann', 'wo', 'warum', 'wie', 'welche',
-  'welcher', 'welches', 'für', 'mit', 'von', 'zu', 'an', 'auf', 'über',
-  'in', 'bei', 'aus', 'es', 'sein', 'seine', 'ich', 'du', 'er', 'sie',
-  'wir', 'ihr', 'mir', 'dir', 'uns', 'euch', 'mich', 'dich',
-]);
-
-function tokenize(question: string): string[] {
-  return question
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}_]+/gu, ' ')
-    .split(/\s+/)
-    .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
-}
-
 /**
- * Retrieve the top-K facts whose entity / claim / sourceExcerpt contains
- * any question token. Score by # tokens matched, tiebreak by recency.
- * Cap context at MAX_CONTEXT_CHARS so the prompt stays small and snappy.
+ * Retrieve top-K facts via the SHARED searchFacts() lib so MCP and the
+ * Ask-Canon UI use bit-identical ranking (entity-boost included). Trim
+ * by char budget so the Gemini prompt stays under a sensible cap.
  */
 async function retrieve(
   userId: string,
   workspace: string,
   question: string,
 ): Promise<CanonCitation[]> {
-  const tokens = tokenize(question);
-  if (tokens.length === 0) return [];
-
-  // One contains-query per token, OR'd together — Postgres handles small
-  // OR-trees fine and the substring search is fast against active facts.
-  const rows = await prisma.factEvent.findMany({
-    where: {
-      userId,
-      workspace,
-      status: 'active',
-      OR: tokens.flatMap((t) => [
-        { claim: { contains: t, mode: 'insensitive' as const } },
-        { sourceExcerpt: { contains: t, mode: 'insensitive' as const } },
-        { entity: { contains: t, mode: 'insensitive' as const } },
-      ]),
-    },
-    select: {
-      id: true, entity: true, claim: true, sourceRef: true,
-      sourceExcerpt: true, metricKey: true, metricValue: true,
-      signedAt: true, eventHash: true,
-    },
-    take: 200,
-    orderBy: { signedAt: 'desc' },
-  });
-
-  // Score each row by how many tokens it matches across the three fields,
-  // then take the top K. Cheap, readable, good-enough demo retrieval.
-  const scored = rows.map((r) => {
-    const hay = (r.claim + ' ' + (r.sourceExcerpt ?? '') + ' ' + r.entity).toLowerCase();
-    let score = 0;
-    for (const t of tokens) if (hay.includes(t)) score++;
-    return { row: r, score };
-  });
-  scored.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return b.row.signedAt.getTime() - a.row.signedAt.getTime();
-  });
-
-  // Trim by char budget so the Gemini prompt stays small.
+  const rows = await searchFacts(userId, question, { workspace, limit: 200 });
   const out: CanonCitation[] = [];
   let chars = 0;
-  for (const { row } of scored) {
+  for (const row of rows) {
     if (out.length >= TOP_K) break;
     const block = row.claim + (row.sourceExcerpt ?? '');
     chars += block.length;
