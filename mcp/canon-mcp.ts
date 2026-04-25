@@ -127,6 +127,16 @@ async function canonLookup(entityArg: string, workspace?: string) {
   const rows = await prisma.factEvent.findMany({
     where: { userId, workspace: ws, entity: slug, status: 'active' },
     orderBy: { signedAt: 'asc' },
+    // Pull signerPubkey + parentHash + sourceExcerpt so the formatter can
+    // render the trust footer (chain integrity) AND the verbatim source
+    // line for each fact — agents (and the human reading the answer) get
+    // both the cryptographic provenance AND the human-readable source
+    // text without a follow-up canon_cite round-trip.
+    select: {
+      id: true, entity: true, claim: true, sourceRef: true,
+      signedAt: true, eventHash: true, signerPubkey: true, parentHash: true,
+      sourceExcerpt: true,
+    },
   });
 
   if (rows.length === 0) {
@@ -140,6 +150,11 @@ async function canonLookup(entityArg: string, workspace?: string) {
       },
       orderBy: { signedAt: 'asc' },
       take: 50,
+      select: {
+        id: true, entity: true, claim: true, sourceRef: true,
+        signedAt: true, eventHash: true, signerPubkey: true, parentHash: true,
+        sourceExcerpt: true,
+      },
     });
     if (fuzzy.length === 0) {
       const known = await listKnownEntities(userId, ws);
@@ -196,33 +211,85 @@ async function canonWorkspaces() {
   return textBlock(lines.join('\n'));
 }
 
-function formatLookup(slug: string, workspace: string, rows: Array<{
+interface FactRowForFormat {
   id: string;
   entity: string;
   claim: string;
   sourceRef: string;
+  sourceExcerpt: string | null;
   signedAt: Date;
   eventHash: string;
-}>): string {
+  signerPubkey: string;
+  parentHash: string | null;
+}
+
+function formatLookup(slug: string, workspace: string, rows: FactRowForFormat[]): string {
   const display = entityDisplay(slug);
   const lines: string[] = [];
-  lines.push(`# Canon facts about ${display} (${slug}) — ${rows.length} active fact(s) · workspace: ${workspace}`);
+  lines.push(`# Canon facts about ${display} (${slug}) — ${rows.length} active signed fact(s) · workspace: ${workspace}`);
+  lines.push('');
+  lines.push(
+    'Each fact is Ed25519-signed and hash-chained. ALWAYS preserve the [signed] line + ' +
+      '[source] line when surfacing facts to the user — those are the trust signal. The audit ' +
+      'footer at the bottom is the chain integrity summary.',
+  );
   lines.push('');
   for (const r of rows) {
     const kind = sourceKindOf(r.sourceRef);
+    const excerpt = r.sourceExcerpt
+      ? r.sourceExcerpt.replace(/\s+/g, ' ').trim().slice(0, 220)
+      : null;
     lines.push(
       `- ${r.claim}\n` +
-        `  · source: ${kind} [${r.sourceRef}]\n` +
-        `  · signed: ${r.signedAt.toISOString()}\n` +
-        `  · factId: ${r.id}\n` +
-        `  · eventHash: ${shortHash(r.eventHash)}`,
+        `  [source] ${kind} · ${r.sourceRef}` +
+        (excerpt ? `\n  [excerpt] "${excerpt}${excerpt.length === 220 ? '…' : ''}"` : '') +
+        `\n  [signed] ${r.signedAt.toISOString()} · factId=${r.id}` +
+        `\n  [crypto] eventHash=${shortHash(r.eventHash)} · parent=${shortHash(r.parentHash)} · signer=${shortKid(r.signerPubkey)}`,
     );
   }
   lines.push('');
+  lines.push(formatTrustFooter(rows));
+  lines.push('');
   lines.push(
-    `Tip: call canon_cite({ factId }) to get the full COSE_Sign1 audit-chain proof for any fact above.`,
+    `Next: canon_cite({ factId }) for the full COSE_Sign1 envelope (hex) of any fact above.`,
   );
   return lines.join('\n');
+}
+
+/**
+ * One-line summary of the chain integrity for the returned set:
+ * how many distinct signers signed it + the kid + the genesis-to-tail span.
+ * Designed so an agent (Claude) can quote it verbatim as the "trust" line.
+ */
+function formatTrustFooter(rows: FactRowForFormat[]): string {
+  if (rows.length === 0) return '';
+  const signers = new Set(rows.map((r) => r.signerPubkey));
+  const kids = [...signers].map(deriveKidFromPubkey);
+  const earliest = rows.reduce((acc, r) => (r.signedAt < acc ? r.signedAt : acc), rows[0].signedAt);
+  const latest = rows.reduce((acc, r) => (r.signedAt > acc ? r.signedAt : acc), rows[0].signedAt);
+  const tail = rows[rows.length - 1].eventHash;
+  return (
+    `Trust chain: ${rows.length} fact(s) signed by ${signers.size} key(s) ` +
+    `[${kids.join(', ')}] from ${earliest.toISOString()} → ${latest.toISOString()} ` +
+    `(tail eventHash=${shortHash(tail)}). Verify any fact offline at /api/verify or via canon-verify CLI.`
+  );
+}
+
+/** Mirrors src/lib/canon/verify-js.ts deriveKid: "canon/" + first 16 hex of pubkey. */
+function deriveKidFromPubkey(wire: string): string {
+  const b64 = wire.startsWith('ed25519:') ? wire.slice('ed25519:'.length) : wire;
+  try {
+    const raw = Buffer.from(b64, 'base64');
+    let hex = '';
+    for (let i = 0; i < raw.length; i++) hex += raw[i].toString(16).padStart(2, '0');
+    return 'canon/' + hex.slice(0, 16);
+  } catch {
+    return 'canon/(unknown)';
+  }
+}
+
+function shortKid(wire: string): string {
+  return deriveKidFromPubkey(wire);
 }
 
 async function canonSearch(query: string, workspace?: string) {
@@ -244,6 +311,11 @@ async function canonSearch(query: string, workspace?: string) {
     },
     orderBy: { signedAt: 'desc' },
     take: 20,
+    select: {
+      id: true, entity: true, claim: true, sourceRef: true,
+      sourceExcerpt: true, signedAt: true, eventHash: true,
+      signerPubkey: true, parentHash: true,
+    },
   });
 
   if (rows.length === 0) {
@@ -253,16 +325,27 @@ async function canonSearch(query: string, workspace?: string) {
   }
 
   const lines: string[] = [];
-  lines.push(`# Canon search "${q}" — ${rows.length} hit(s) · workspace: ${ws}`);
+  lines.push(`# Canon search "${q}" — ${rows.length} signed hit(s) · workspace: ${ws}`);
+  lines.push('');
+  lines.push(
+    'Each hit is Ed25519-signed and hash-chained. Preserve [source] + [signed] + [crypto] ' +
+      'when surfacing to the user — those are the trust signal.',
+  );
   lines.push('');
   for (const r of rows) {
+    const excerpt = r.sourceExcerpt
+      ? r.sourceExcerpt.replace(/\s+/g, ' ').trim().slice(0, 220)
+      : null;
     lines.push(
       `- [${r.entity}] ${r.claim}\n` +
-        `  · source: ${sourceKindOf(r.sourceRef)} [${r.sourceRef}]\n` +
-        `  · signed: ${r.signedAt.toISOString()}\n` +
-        `  · factId: ${r.id} · eventHash: ${shortHash(r.eventHash)}`,
+        `  [source] ${sourceKindOf(r.sourceRef)} · ${r.sourceRef}` +
+        (excerpt ? `\n  [excerpt] "${excerpt}${excerpt.length === 220 ? '…' : ''}"` : '') +
+        `\n  [signed] ${r.signedAt.toISOString()} · factId=${r.id}` +
+        `\n  [crypto] eventHash=${shortHash(r.eventHash)} · parent=${shortHash(r.parentHash)} · signer=${shortKid(r.signerPubkey)}`,
     );
   }
+  lines.push('');
+  lines.push(formatTrustFooter(rows));
   return textBlock(lines.join('\n'));
 }
 
@@ -447,7 +530,10 @@ async function main() {
         'Examples of when to call this BEFORE grep / file search: ' +
         '"What do we know about Miller Group?", "Tell me about Gonzalez Inc", ' +
         '"Status on Johnson Group POC?", "Bright Plc relationship type?", ' +
-        '"What\'s the actual price of product B07JW9H4J1?".',
+        '"What\'s the actual price of product B07JW9H4J1?". ' +
+        'IMPORTANT: when surfacing the answer to the user, ALWAYS preserve the [source] + ' +
+        '[signed] + [crypto] lines and the trailing "Trust chain: …" footer verbatim — they ' +
+        'are the cryptographic provenance the user relies on. Do not summarise them away.',
       inputSchema: {
         entity: z
           .string()
@@ -476,7 +562,10 @@ async function main() {
         'cryptographically signed Canon fact (claim, source excerpt, entity). ' +
         'Examples: "Manufacturing", "Voice Commerce Assistant", "₹1999", "Bright Plc", "Healthcare", ' +
         '"per_seat_price", "Gonzalez". Returns top 20 hits with sources + factIds. ' +
-        'Prefer Canon over grep for any business / customer / product / metric question.',
+        'Prefer Canon over grep for any business / customer / product / metric question. ' +
+        'IMPORTANT: when surfacing the answer to the user, ALWAYS preserve the [source] + ' +
+        '[signed] + [crypto] lines + the "Trust chain: …" footer verbatim — they are the ' +
+        'cryptographic provenance the user relies on.',
       inputSchema: {
         query: z.string().describe('Free text to match against claim / sourceExcerpt / entity (case-insensitive substring).'),
         workspace: z
