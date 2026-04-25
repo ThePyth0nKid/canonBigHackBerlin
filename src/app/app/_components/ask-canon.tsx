@@ -32,12 +32,22 @@ export function AskCanon() {
     const trimmed = q.trim();
     if (!trimmed) return;
     setError(null);
+    setAnswer(null);
     start(async () => {
-      const res = await askCanonAction({ question: trimmed });
-      if ('error' in res) setError(res.error);
-      else {
-        setAnswer(res);
-        setError(null);
+      try {
+        const res = await askCanonAction({ question: trimmed });
+        if ('error' in res) {
+          setError(res.error);
+          setAnswer(null);
+        } else {
+          setAnswer(res);
+          setError(null);
+        }
+      } catch (e) {
+        // Server actions reject when the runtime throws past the action
+        // body. Without this catch the spinner stayed armed forever.
+        setError((e as Error)?.message ?? 'Ask Canon failed unexpectedly');
+        setAnswer(null);
       }
     });
   }

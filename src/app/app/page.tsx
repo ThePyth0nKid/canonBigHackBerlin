@@ -67,6 +67,12 @@ export default async function WorkspacePage() {
             </form>
           </div>
 
+          {/* Ask-Canon hero — sits directly under the H1 because the
+              audience asks "what can I do here?" first; everything below
+              this line is supporting context (sync controls, banners,
+              source list, file drop). */}
+          <AskCanon />
+
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-400">
               {wsMeta.description}
@@ -85,11 +91,6 @@ export default async function WorkspacePage() {
           </div>
 
           <FileDropIngest workspace="inazuma" />
-
-          {/* Ask-Canon: Gemini answers from the signed ledger with citations.
-              Lives at the bottom of the header so it sits above the entity
-              landscape but below the trust banners. */}
-          <AskCanon />
         </header>
 
         {/* Stats: groupBy queries — fast (<200ms). Independent suspense

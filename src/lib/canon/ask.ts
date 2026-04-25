@@ -228,22 +228,35 @@ export async function askCanon(args: {
   ].join('\n');
 
   const ai = getAi();
-  const res = await ai.models.generateContent({
-    model: MODEL,
-    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-    config: {
-      systemInstruction: SYSTEM_PROMPT,
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
-      temperature: 0.2,
-    },
-  });
 
+  // Hard 25s budget — Vertex AI on Railway has cold-starts that occasionally
+  // stretch past 60s, which would silently leave the UI spinner armed
+  // forever. Promise.race surfaces a deterministic error the UI can render.
+  const timeoutMs = 25_000;
   let parsed: { answer: string; citedFactIds: string[]; confidence: 'high' | 'medium' | 'low' };
   try {
+    const res = await Promise.race([
+      ai.models.generateContent({
+        model: MODEL,
+        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          responseMimeType: 'application/json',
+          responseSchema: RESPONSE_SCHEMA,
+          temperature: 0.2,
+        },
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(new Error(`Gemini timeout after ${timeoutMs / 1000}s — try a shorter question`)),
+          timeoutMs,
+        ),
+      ),
+    ]);
     parsed = JSON.parse(res.text ?? '');
-  } catch {
-    return { error: 'Gemini returned a non-JSON response' };
+  } catch (e) {
+    return { error: (e as Error).message || 'Gemini call failed' };
   }
 
   // Filter cited ids against retrieved set so the UI never renders a link
