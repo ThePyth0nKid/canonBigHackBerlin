@@ -14,6 +14,7 @@ import { FileDropIngest } from './_components/file-drop-ingest';
 import { EntitySection } from './_components/entity-section';
 import { TailLoader } from './_components/tail-loader';
 import { ConnectedSources } from './_components/connected-sources';
+import { AskCanon } from './_components/ask-canon';
 
 export const dynamic = 'force-dynamic';
 
@@ -84,6 +85,11 @@ export default async function WorkspacePage() {
           </div>
 
           <FileDropIngest workspace="inazuma" />
+
+          {/* Ask-Canon: Gemini answers from the signed ledger with citations.
+              Lives at the bottom of the header so it sits above the entity
+              landscape but below the trust banners. */}
+          <AskCanon />
         </header>
 
         {/* Stats: groupBy queries — fast (<200ms). Independent suspense
