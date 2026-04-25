@@ -43,15 +43,20 @@ export interface ConflictResolution {
 }
 
 /**
- * Run a fresh sweep against the user's active fact set. Returns groups
- * (incl. corroborated ones) plus the auto-applied resolutions.
+ * Run a fresh sweep against the user's active fact set in the given
+ * workspace. Returns groups (incl. corroborated ones) plus the
+ * auto-applied resolutions. Workspace-scoped so cross-workspace entity
+ * collisions can never auto-supersede facts across the boundary.
  */
-export async function resolveUserConflicts(userId: string): Promise<{
+export async function resolveUserConflicts(
+  userId: string,
+  workspace: string = 'northwind',
+): Promise<{
   groups: ConflictGroup[];
   resolutions: ConflictResolution[];
 }> {
   const facts = await prisma.factEvent.findMany({
-    where: { userId, status: 'active' },
+    where: { userId, workspace, status: 'active' },
     orderBy: { observedAt: 'desc' },
   });
 

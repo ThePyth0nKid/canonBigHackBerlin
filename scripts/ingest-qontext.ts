@@ -82,7 +82,7 @@ async function main() {
   );
 
   // 3. Conflict pass — clusters Qontext entities the same way as Northwind.
-  const conflicts = await resolveUserConflicts(user.id);
+  const conflicts = await resolveUserConflicts(user.id, 'inazuma');
   const trueConflicts = conflicts.groups.filter((g) => g.values.length > 1);
   const corroborated = conflicts.groups.filter(
     (g) => g.values.length === 1 && g.totalFacts >= 2,
