@@ -19,7 +19,18 @@
  *   npx @modelcontextprotocol/inspector npx tsx mcp/canon-mcp.ts
  */
 
-import 'dotenv/config';
+// Load env from the project's own .env / .env.local — not from cwd, because
+// the MCP server is registered at user scope and may be spawned from any
+// directory (e.g. ~). __dirname-relative paths keep DATABASE_URL etc. resolvable.
+// quiet:true is critical — dotenv v17 emits "◇ injected env" lines on stdout
+// by default, which breaks MCP (stdout must be pure JSON-RPC).
+import { config as loadDotenv } from 'dotenv';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+loadDotenv({ path: resolve(__dirname, '..', '.env'), quiet: true });
+loadDotenv({ path: resolve(__dirname, '..', '.env.local'), override: true, quiet: true });
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
