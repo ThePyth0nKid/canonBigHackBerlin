@@ -73,9 +73,17 @@ const MAX_TOTAL_FILES = 1000;
 const MAX_TOTAL_BYTES = 200 * 1024 * 1024; // 200 MB
 
 export async function POST(req: Request) {
+  const reqStart = Date.now();
+  const ctype = req.headers.get('content-type') ?? '';
+  const clen = req.headers.get('content-length') ?? '?';
+  console.log(
+    `[ingest-upload] POST received content-length=${clen} content-type=${ctype.slice(0, 80)}`,
+  );
+
   const session = await auth();
   const userId = (session?.user as { id?: string } | undefined)?.id;
   if (!userId) {
+    console.warn('[ingest-upload] 401 unauthorized — no session');
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
 
@@ -85,16 +93,24 @@ export async function POST(req: Request) {
   let files: File[];
   let workspace: string;
   try {
+    console.log('[ingest-upload] parsing FormData…');
+    const fdStart = Date.now();
     const fd = await req.formData();
+    const fdMs = Date.now() - fdStart;
     const raw = fd.getAll('files');
     files = raw.filter((f): f is File => f instanceof File && f.size > 0);
+    console.log(
+      `[ingest-upload] FormData parsed in ${fdMs}ms · raw entries=${raw.length} · valid files=${files.length}`,
+    );
     if (files.length === 0) {
+      console.warn('[ingest-upload] 400 no files in FormData');
       return NextResponse.json(
         { error: 'no files received (use form field "files")' },
         { status: 400 },
       );
     }
     if (files.length > MAX_TOTAL_FILES) {
+      console.warn(`[ingest-upload] 400 too many files (${files.length})`);
       return NextResponse.json(
         {
           error: `too many files (${files.length}); cap is ${MAX_TOTAL_FILES} per request`,
@@ -104,6 +120,9 @@ export async function POST(req: Request) {
     }
     const totalBytes = files.reduce((s, f) => s + f.size, 0);
     if (totalBytes > MAX_TOTAL_BYTES) {
+      console.warn(
+        `[ingest-upload] 413 payload too large (${(totalBytes / 1024 / 1024).toFixed(1)}MB)`,
+      );
       return NextResponse.json(
         {
           error: `payload too large (${(totalBytes / 1024 / 1024).toFixed(1)} MB); cap is ${
@@ -115,13 +134,18 @@ export async function POST(req: Request) {
     }
     const ws = (fd.get('workspace') as string | null) ?? 'main';
     if (!ALLOWED_WORKSPACES.has(ws)) {
+      console.warn(`[ingest-upload] 400 bad workspace=${ws}`);
       return NextResponse.json(
         { error: `workspace must be one of: ${[...ALLOWED_WORKSPACES].join(', ')}` },
         { status: 400 },
       );
     }
     workspace = ws;
+    console.log(
+      `[ingest-upload] accepted user=${userId} ws=${workspace} files=${files.length} totalMB=${(totalBytes / 1024 / 1024).toFixed(1)} latencySoFar=${Date.now() - reqStart}ms`,
+    );
   } catch (err) {
+    console.error('[ingest-upload] multipart parse threw:', err);
     return NextResponse.json(
       { error: `multipart parse failed: ${(err as Error).message}` },
       { status: 400 },
@@ -376,6 +400,7 @@ export async function POST(req: Request) {
         });
         controller.close();
       } catch (err) {
+        console.error('[ingest-upload] pipeline threw inside SSE stream:', err);
         send({
           phase: 'error',
           message: (err as Error).message ?? 'unknown error',

@@ -124,12 +124,18 @@ export function FileDropIngest({ workspace }: Props) {
       try {
         const res = await fetch('/api/ingest-upload', { method: 'POST', body: fd });
         if (!res.ok || !res.body) {
-          let msg = `HTTP ${res.status}`;
+          let msg = `HTTP ${res.status} ${res.statusText}`.trim();
           try {
-            const j = await res.json();
-            if (j?.error) msg = j.error;
+            const ctype = res.headers.get('content-type') ?? '';
+            if (ctype.includes('application/json')) {
+              const j = await res.json();
+              if (j?.error) msg = `${res.status}: ${j.error}`;
+            } else {
+              const t = await res.text();
+              if (t.trim()) msg = `${res.status}: ${t.slice(0, 240)}`;
+            }
           } catch {
-            /* fallthrough */
+            /* keep default msg */
           }
           setError(msg);
           aborted = true;
