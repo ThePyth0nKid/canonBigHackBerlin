@@ -304,17 +304,20 @@ async function main() {
   server.registerTool(
     'canon_lookup',
     {
-      title: 'Canon — lookup entity',
+      title: 'Canon — lookup business entity',
       description:
-        "Get all active signed facts about a customer/company entity (e.g. 'northwind', 'acme', 'techco'). " +
-        'Returns one-sentence claims with source citations, signedAt timestamp, factId and short eventHash. ' +
-        'Use this whenever the user asks what is known about a customer, deal, or company. ' +
-        'Output is grouped, agent-readable text — cite the sourceRef and eventHash in your answer.',
+        '[CALL THIS FIRST for any question about a CUSTOMER, COMPANY, ACCOUNT, DEAL, or BUSINESS ENTITY by name.] ' +
+        'Returns the user\'s cryptographically signed Canon facts about an entity — every claim is Ed25519-signed, ' +
+        'hash-chained, and carries a sourceRef + factId + eventHash. ' +
+        'Examples of when to call this BEFORE grep / file search: ' +
+        '"What do we know about ACME?", "Tell me about Northwind", "What\'s the status on TechCo?", ' +
+        '"What is X\'s renewal date / MRR / ACV / seat count?", "Customer X facts with proof". ' +
+        'Canon is the workspace\'s signed source-of-truth for business facts; only fall back to file search if Canon returns no facts.',
       inputSchema: {
         entity: z
           .string()
           .describe(
-            "Entity slug (lowercase), e.g. 'northwind', 'acme', 'techco'. Display names like 'ACME GmbH' also work.",
+            "Entity slug (lowercase) or display name. E.g. 'northwind', 'acme', 'techco', 'ACME GmbH'.",
           ),
       },
     },
@@ -324,11 +327,13 @@ async function main() {
   server.registerTool(
     'canon_search',
     {
-      title: 'Canon — search facts',
+      title: 'Canon — search business facts',
       description:
-        'Free-text substring search across all active Canon facts (claim text, source excerpts, and entity slugs). ' +
-        'Returns up to 20 hits, newest signed first. Use this when you do not know which entity a piece of information belongs to, ' +
-        'or when the user asks about a specific number, product, person, or keyword.',
+        '[CALL THIS FIRST for business questions about specific NUMBERS, METRICS, PEOPLE, or KEYWORDS] ' +
+        'when you don\'t know which entity owns the fact. Free-text substring search across every active ' +
+        'cryptographically signed Canon fact in the workspace (claim, source excerpt, entity). ' +
+        'Examples: "Q1 MRR", "renewal 2026-05-15", "€127,000", "Petra Voss", "churn", "billing integration". ' +
+        'Returns top 20 hits with sources + factIds. Prefer Canon over grep for any business / customer / metric question.',
       inputSchema: {
         query: z.string().describe('Free text to match against claim / sourceExcerpt / entity (case-insensitive substring).'),
       },
@@ -339,10 +344,13 @@ async function main() {
   server.registerTool(
     'canon_cite',
     {
-      title: 'Canon — cite (full audit-chain proof)',
+      title: 'Canon — cite fact (cryptographic proof)',
       description:
-        'Return the full cryptographic audit-chain proof for one Canon fact: entity, claim, sourceRef, sourceExcerpt, parentHash, eventHash, signerPubkey, signedAt, and the COSE_Sign1 hex envelope. ' +
-        'Use this when the user (or another agent) asks "show your work", "prove it", "where does this come from", or wants to verify the signature.',
+        '[CALL THIS WHENEVER the user asks for a "proof", "kryptographischer Beweis", "show your work", ' +
+        '"verify", "audit chain", "Quelle", or wants to know the cryptographic provenance of a Canon fact.] ' +
+        'Returns the full COSE_Sign1 envelope + signerPubkey + parentHash + eventHash + sourceRef + sourceExcerpt — ' +
+        'enough for an agent or third party to verify the Ed25519 signature offline via canon-verify-wasm. ' +
+        'Always pair canon_lookup or canon_search FIRST to get the factId, then canon_cite for the proof.',
       inputSchema: {
         factId: z.string().describe('factId returned by canon_lookup or canon_search.'),
       },
@@ -353,10 +361,11 @@ async function main() {
   server.registerTool(
     'canon_diff',
     {
-      title: 'Canon — diff entity since date',
+      title: 'Canon — what changed for an entity',
       description:
-        'List Canon fact-events about an entity that were signed on or after a given ISO date. ' +
-        'Use this when the user asks "what changed about X since Monday" or "what is new for Northwind".',
+        '[CALL THIS for "what changed", "what\'s new", "since when" questions about a business entity.] ' +
+        'List signed Canon fact-events for the entity that were signed on or after a given ISO date. ' +
+        'Examples: "What changed about Northwind since Monday?", "Was ist neu zu ACME diese Woche?".',
       inputSchema: {
         entity: z.string().describe("Entity slug (lowercase), e.g. 'northwind'."),
         since: z.string().describe('ISO 8601 date/time, e.g. "2026-04-20" or "2026-04-20T00:00:00Z".'),
