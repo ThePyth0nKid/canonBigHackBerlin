@@ -71,9 +71,12 @@ function isUserMessage(m: SlackMessage): boolean {
 function messagesToChunks(channel: string, messages: SlackMessage[]): Chunk[] {
   return messages.map((m) => {
     const text = cleanSlackText(m.text);
+    // Author suffix lets /decide page identify the human behind the fact
+    // for the Stage-1 ask-source-authors path. Empty when bot/system msg.
+    const authorSuffix = m.user ? `#u=${m.user}` : '';
     return {
       text,
-      sourceRef: `slack:${channel}:${m.ts}`,
+      sourceRef: `slack:${channel}:${m.ts}${authorSuffix}`,
       observedAt: tsToIso(m.ts),
       sourceExcerpt: text.slice(0, 240),
       // Internal team channel — facts without an explicit customer name

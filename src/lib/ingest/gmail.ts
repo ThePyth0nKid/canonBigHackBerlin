@@ -129,16 +129,27 @@ function messageToChunks(m: GmailMessage): Chunk[] {
   const body = extractBody(m.payload);
   const cleaned = stripQuotedReplies(body);
   const paragraphs = chunkParagraphs(cleaned);
+  // Sender suffix lets /decide identify the human author for Stage-1
+  // ask-source-authors. Falls back gracefully when From is missing.
+  const fromEmail = parseEmailFromHeader(headerOf(m.payload, 'From'));
+  const fromSuffix = fromEmail ? `#from=${fromEmail}` : '';
 
   return paragraphs.map((para, idx) => ({
     text: `${subject}. ${para}`,
-    sourceRef: `gmail:${m.id}#p${idx}`,
+    sourceRef: `gmail:${m.id}#p${idx}${fromSuffix}`,
     observedAt,
     sourceExcerpt: para.slice(0, 240),
     // Inbox-context: emails without an explicit customer name belong to
     // Inazuma itself (post-pivot — single-workspace world).
     defaultEntity: 'inazuma',
   }));
+}
+
+function parseEmailFromHeader(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const angle = raw.match(/<([^>]+)>/);
+  const candidate = (angle?.[1] ?? raw).trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate) ? candidate : undefined;
 }
 
 function headerOf(p: GmailPayload, name: string): string | undefined {

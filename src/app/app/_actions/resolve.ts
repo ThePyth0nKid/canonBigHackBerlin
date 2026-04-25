@@ -148,6 +148,7 @@ async function runCanonicalResolution(args: {
   ]);
 
   revalidatePath('/app');
+  revalidatePath('/decide');
   return { ok: true, superseded: losers.length, resolutionFactId };
 }
 
@@ -230,5 +231,6 @@ async function runDistinctRecords(args: {
   ]);
 
   revalidatePath('/app');
+  revalidatePath('/decide');
   return { ok: true, superseded: 0, resolutionFactId };
 }
