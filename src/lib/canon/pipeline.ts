@@ -37,6 +37,12 @@ export interface PipelineRunInput {
   context: string;
   /** Free-form label, e.g. "Slack #sales (10 messages)". */
   contextLabel: string;
+  /**
+   * Workspace tag — every FactEvent persisted by this run lands in this
+   * workspace. Default 'northwind' for backward compatibility with the
+   * existing sync flow; the Qontext-dataset ingest passes 'inazuma'.
+   */
+  workspace?: string;
   /** Reuse a long-lived signer across batches. Pipeline will spawn one if omitted. */
   signer?: CanonSigner;
   /** Skip Gemini call (offline / quota-budget mode). Defaults to false. */
@@ -51,7 +57,14 @@ export interface PipelineRunResult {
 }
 
 export async function runPipeline(input: PipelineRunInput): Promise<PipelineRunResult> {
-  const { userId, drafts, context, contextLabel, skipAudit = false } = input;
+  const {
+    userId,
+    drafts,
+    context,
+    contextLabel,
+    skipAudit = false,
+    workspace = 'northwind',
+  } = input;
   const ownsSigner = !input.signer;
   const signer = input.signer ?? new CanonSigner();
   signer.start();
@@ -61,8 +74,9 @@ export async function runPipeline(input: PipelineRunInput): Promise<PipelineRunR
     ? drafts.map(() => ({ confirmed: true, confidence: 0 }))
     : await auditBatch(drafts, context, contextLabel);
 
-  // Hash-chain head: tail eventHash for the user, or empty for genesis.
-  let parentHash = await fetchTailEventHash(userId);
+  // Hash-chain head: per-workspace tail eventHash, empty for genesis. Each
+  // workspace gets its own chain so cross-workspace order doesn't mix.
+  let parentHash = await fetchTailEventHash(userId, workspace);
 
   const outcomes: PipelineOutcome[] = [];
   let active = 0;
@@ -112,6 +126,7 @@ export async function runPipeline(input: PipelineRunInput): Promise<PipelineRunR
         data: {
           id: factId,
           userId,
+          workspace,
           entity: draft.entity,
           claim: claimToSign,
           metricKey: draft.metric?.key ?? null,
@@ -170,9 +185,9 @@ function decide(
   return { status: 'active' };
 }
 
-async function fetchTailEventHash(userId: string): Promise<string> {
+async function fetchTailEventHash(userId: string, workspace: string): Promise<string> {
   const tail = await prisma.factEvent.findFirst({
-    where: { userId },
+    where: { userId, workspace },
     orderBy: { createdAt: 'desc' },
     select: { eventHash: true },
   });

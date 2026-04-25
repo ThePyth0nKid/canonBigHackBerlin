@@ -46,13 +46,35 @@ export interface QontextLimits {
 }
 
 const DEFAULT_LIMITS: Required<QontextLimits> = {
-  maxClients: 8,
-  maxCustomers: 5,
-  maxEmployees: 6,
-  maxEmails: 12,
-  maxConversations: 6,
-  maxPosts: 4,
+  maxClients: 40,
+  maxCustomers: 12,
+  maxEmployees: 15,
+  maxEmails: 30,
+  maxConversations: 15,
+  maxPosts: 10,
 };
+
+/**
+ * Names where the Qontext dataset *itself* contains a duplicate or
+ * cross-system ambiguity. Forced into the sample to make sure the demo
+ * surfaces a real conflict from the customer's data — not one we
+ * fabricated.
+ */
+const FORCED_CLIENT_BUSINESS_NAMES = [
+  'Miller Group',     // appears 2x in clients.json with industry=Entertainment AND Manufacturing
+  'Gonzalez Inc',     // appears 2x with industry=Manufacturing AND Entertainment
+  'Johnson Group',    // appears 2x with industry=Transportation AND Logistics
+];
+
+/**
+ * Names that appear in BOTH clients.json and vendors.json — natural
+ * cross-source corroboration material (same company, two roles).
+ */
+const FORCED_DUAL_ROLE_NAMES = [
+  'Huang LLC',
+  'Williams Group',
+  'Martin Ltd',
+];
 
 export interface QontextIngestResult {
   /** Direct structured FactDrafts that skip Pioneer. */
@@ -90,17 +112,57 @@ export async function loadQontextSample(
   };
 
   // 1. Clients — B2B engagements (richest entity records).
+  // Strategy: ALWAYS include the records whose business_name appears more
+  // than once OR appears in both clients + vendors — those are the
+  // dataset's own conflict / cross-source signals and the demo's gold.
+  // Then fill the remainder with deterministic spaced sampling.
+  let allClientsCached: ClientRecord[] = [];
   try {
     const clients = await readJson<ClientRecord[]>(
       'Business_and_Management/clients.json',
     );
-    const sampled = pickSample(clients, lim.maxClients);
+    allClientsCached = clients;
+    const forced = clients.filter((c) =>
+      [...FORCED_CLIENT_BUSINESS_NAMES, ...FORCED_DUAL_ROLE_NAMES].some(
+        (n) => (c.business_name ?? '').toLowerCase() === n.toLowerCase(),
+      ),
+    );
+    const remainingBudget = Math.max(0, lim.maxClients - forced.length);
+    const others = clients.filter((c) => !forced.includes(c));
+    const filler = pickSample(others, remainingBudget);
+    const sampled = [...forced, ...filler];
     for (const c of sampled) {
       directDrafts.push(...clientToDrafts(c));
     }
     counts.clients = sampled.length;
   } catch (e) {
     console.warn('[qontext] clients.json skipped:', (e as Error).message);
+  }
+
+  // 1b. Vendors — pick the dual-role names so the same business shows up
+  // in two roles, plus a sampled remainder. Each vendor record provides
+  // 2-3 facts (industry, business_type, relationship_description).
+  try {
+    const vendors = await readJson<VendorRecord[]>(
+      'Business_and_Management/vendors.json',
+    );
+    const dualRoleVendors = vendors.filter((v) =>
+      FORCED_DUAL_ROLE_NAMES.some(
+        (n) => (v.business_name ?? '').toLowerCase() === n.toLowerCase(),
+      ),
+    );
+    const sampled = [
+      ...dualRoleVendors,
+      ...pickSample(
+        vendors.filter((v) => !dualRoleVendors.includes(v)),
+        Math.max(0, lim.maxClients - dualRoleVendors.length),
+      ),
+    ].slice(0, lim.maxClients);
+    for (const v of sampled) {
+      directDrafts.push(...vendorToDrafts(v));
+    }
+  } catch (e) {
+    console.warn('[qontext] vendors.json skipped:', (e as Error).message);
   }
 
   // 2. Customers — D2C retail (lighter records).
@@ -199,6 +261,18 @@ interface ClientRecord {
   current_POC_product?: string;
   POC_status?: string;
   engagement_value?: string;
+}
+
+interface VendorRecord {
+  client_id: string;
+  business_name: string;
+  industry?: string;
+  business_type?: string;
+  registered_address?: string;
+  tax_id?: string;
+  onboarding_date?: string;
+  relationship_description?: string;
+  management_representative_employee?: string;
 }
 
 interface CustomerRecord {
@@ -308,6 +382,49 @@ function clientToDrafts(c: ClientRecord): FactDraft[] {
       },
       sourceRef: ref,
       sourceExcerpt: `contact: ${c.contact_person_name}${c.contact_email ? `, ${c.contact_email}` : ''}`,
+      observedAt: observed,
+    });
+  }
+  return drafts;
+}
+
+function vendorToDrafts(v: VendorRecord): FactDraft[] {
+  const slug = clientSlug(v.business_name);
+  const observed = parseDateOrNow(v.onboarding_date);
+  const ref = `qontext:vendor:${v.client_id}`;
+  const drafts: FactDraft[] = [];
+  // Use the SAME metric keys as clientToDrafts so the conflict detector
+  // clusters them. When the same business shows up in both clients.json
+  // and vendors.json with different industry, Canon surfaces it as a
+  // user-pickable conflict — that's the cross-source-corroboration demo
+  // beat lifted directly out of the customer's own data.
+  if (v.industry) {
+    drafts.push({
+      entity: slug,
+      claim: `${v.business_name} operates in industry: ${v.industry} (per vendor record).`,
+      metric: { key: 'industry', value: v.industry },
+      sourceRef: ref,
+      sourceExcerpt: `vendor record: ${v.business_name}, industry: ${v.industry}`,
+      observedAt: observed,
+    });
+  }
+  if (v.business_type) {
+    drafts.push({
+      entity: slug,
+      claim: `${v.business_name} relationship type: ${v.business_type} (per vendor record).`,
+      metric: { key: 'relationship_type', value: v.business_type },
+      sourceRef: ref,
+      sourceExcerpt: `vendor relationship_type: ${v.business_type}`,
+      observedAt: observed,
+    });
+  }
+  if (v.relationship_description) {
+    drafts.push({
+      entity: slug,
+      claim: `${v.business_name} vendor scope: ${v.relationship_description}`,
+      metric: { key: 'vendor_scope', value: 'documented' },
+      sourceRef: ref,
+      sourceExcerpt: v.relationship_description.slice(0, 200),
       observedAt: observed,
     });
   }

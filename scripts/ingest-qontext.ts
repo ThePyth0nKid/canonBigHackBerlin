@@ -29,8 +29,11 @@ async function main() {
   console.log(`user: ${user.email ?? user.id}`);
 
   if (reset) {
-    const r = await prisma.factEvent.deleteMany({ where: { userId: user.id } });
-    console.log(`(reset: cleared ${r.count} prior FactEvents)\n`);
+    // Reset wipes ONLY the inazuma workspace; northwind facts stay intact.
+    const r = await prisma.factEvent.deleteMany({
+      where: { userId: user.id, workspace: 'inazuma' },
+    });
+    console.log(`(reset: cleared ${r.count} prior Inazuma FactEvents)\n`);
   }
 
   const t0 = Date.now();
@@ -70,6 +73,7 @@ async function main() {
     contextLabel: `Qontext sample (Inazuma.co · ${allDrafts.length} drafts)`,
     signer,
     skipAudit,
+    workspace: 'inazuma',
   });
   await signer.close();
 

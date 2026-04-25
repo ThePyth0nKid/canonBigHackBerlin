@@ -25,6 +25,10 @@ export async function resolveConflict(args: {
   const userId = (session.user as { id?: string }).id;
   if (!userId) return { ok: false, superseded: 0 };
 
+  // Lookup the winner first — its workspace becomes the scope for everything
+  // that follows. Without this scoping, picking ACME.seats=50 in Northwind
+  // could accidentally supersede an unrelated huang_llc.industry fact in
+  // Inazuma if the entity slugs ever collided.
   const winner = await prisma.factEvent.findFirst({
     where: { id: args.winnerFactId, userId },
     select: {
@@ -33,13 +37,17 @@ export async function resolveConflict(args: {
       metricKey: true,
       metricValue: true,
       metricUnit: true,
+      workspace: true,
     },
   });
   if (!winner) return { ok: false, superseded: 0 };
 
+  const workspace = winner.workspace;
+
   const losers = await prisma.factEvent.findMany({
     where: {
       userId,
+      workspace,
       entity: args.entity,
       metricKey: args.metricKey,
       status: 'active',
@@ -48,9 +56,9 @@ export async function resolveConflict(args: {
     select: { id: true, metricValue: true },
   });
 
-  // Tip of the chain — the new resolution event chains off it.
+  // Tip of the per-workspace chain — the new resolution event chains off it.
   const tail = await prisma.factEvent.findFirst({
-    where: { userId },
+    where: { userId, workspace },
     orderBy: { signedAt: 'desc' },
     select: { eventHash: true },
   });
@@ -82,6 +90,7 @@ export async function resolveConflict(args: {
       data: {
         id: resolutionFactId,
         userId,
+        workspace,
         entity: args.entity,
         claim,
         metricKey: args.metricKey,

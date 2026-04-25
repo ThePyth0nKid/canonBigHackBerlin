@@ -62,9 +62,26 @@ const ENTITY_DISPLAY: Record<string, string> = {
   initech: 'Initech',
   umbrella: 'Umbrella',
   soylent: 'Soylent',
+  inazuma: 'Inazuma.co',
 };
 
+export const WORKSPACES = [
+  { slug: 'northwind', label: 'Northwind', description: 'Demo CFO workspace · Slack/Gmail/PDF' },
+  { slug: 'inazuma', label: 'Inazuma.co', description: 'Qontext-supplied dataset · 11 systems' },
+] as const;
+
+export type WorkspaceSlug = (typeof WORKSPACES)[number]['slug'];
+
 const METRIC_LABELS: Record<string, string> = {
+  industry: 'Industry',
+  relationship_type: 'Relationship type',
+  monthly_revenue: 'Monthly revenue',
+  poc_product: 'POC product',
+  primary_contact: 'Primary contact',
+  vendor_scope: 'Vendor scope',
+  customer_type: 'Customer type',
+  role_category: 'Role category',
+  social_post: 'Social post',
   mrr: 'Q1 MRR',
   arr: 'ARR',
   acv: 'ACV',
@@ -87,9 +104,12 @@ export interface FactLandscape {
   unresolvedConflicts: number;
 }
 
-export async function loadFactLandscape(userId: string): Promise<FactLandscape> {
+export async function loadFactLandscape(
+  userId: string,
+  workspace: string = 'northwind',
+): Promise<FactLandscape> {
   const rows = await prisma.factEvent.findMany({
-    where: { userId, NOT: { status: 'resolution' } },
+    where: { userId, workspace, NOT: { status: 'resolution' } },
     orderBy: { signedAt: 'asc' },
     take: 5000,
   });
@@ -253,13 +273,22 @@ function latestTime(rows: FactRow[]): number {
 }
 
 function entityOrder(slug: string): number {
-  const order = ['northwind', 'acme', 'techco', 'globex', 'initech', 'umbrella', 'soylent'];
+  const order = [
+    // Northwind workspace primary entities
+    'northwind', 'acme', 'techco', 'globex', 'initech', 'umbrella', 'soylent',
+    // Inazuma workspace primary entity
+    'inazuma',
+    // Inazuma's "demo gold" entities — surface them above the alphabetical noise
+    'miller_group', 'gonzalez_inc', 'johnson_group',
+    'huang_llc', 'williams_group', 'martin_ltd',
+  ];
   const i = order.indexOf(slug);
   return i < 0 ? 999 : i;
 }
 
 function metricOrder(key: string): number {
   const order = [
+    // Northwind canonical
     'mrr',
     'arr',
     'acv',
@@ -271,6 +300,15 @@ function metricOrder(key: string): number {
     'per_seat_price',
     'billing_cycle',
     'churn',
+    // Inazuma canonical
+    'industry',
+    'relationship_type',
+    'monthly_revenue',
+    'poc_product',
+    'primary_contact',
+    'vendor_scope',
+    'role_category',
+    'customer_type',
   ];
   const i = order.indexOf(key);
   return i < 0 ? 999 : i;

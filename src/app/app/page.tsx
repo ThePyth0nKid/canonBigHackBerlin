@@ -1,22 +1,53 @@
 import { auth, signOut } from '@/auth';
 import { redirect } from 'next/navigation';
-import { loadFactLandscape, type EntityGroup, type MetricGroup } from '@/lib/canon/view';
+import { prisma } from '@/lib/prisma';
+import {
+  loadFactLandscape,
+  WORKSPACES,
+  type EntityGroup,
+  type MetricGroup,
+} from '@/lib/canon/view';
 import { ProofButton } from './_components/proof-modal';
 import { ConflictResolve } from './_components/conflict-resolve';
 import { SourcePill } from './_components/source-pill';
 import { AikidoRepoBanner } from './_components/aikido-banner';
 import { SyncButton } from './_components/sync-button';
+import { WorkspaceSwitcher } from './_components/workspace-switcher';
 
 export const dynamic = 'force-dynamic';
 
-export default async function WorkspacePage() {
+export default async function WorkspacePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ ws?: string }>;
+}) {
   const session = await auth();
   if (!session?.user) redirect('/login');
   const userId = (session.user as { id?: string }).id;
   if (!userId) redirect('/login');
 
-  const land = await loadFactLandscape(userId);
+  const sp = await searchParams;
+  const wsParam = sp?.ws ?? 'northwind';
+  const activeWorkspace =
+    WORKSPACES.find((w) => w.slug === wsParam)?.slug ?? 'northwind';
+
+  // Per-workspace fact counts for the switcher badges (one extra cheap query
+  // — gives jurors the "two workspaces, one ledger" beat at a glance).
+  const counts = await prisma.factEvent.groupBy({
+    by: ['workspace'],
+    where: { userId, status: 'active' },
+    _count: { _all: true },
+  });
+  const badges: Record<string, string> = {};
+  for (const w of WORKSPACES) {
+    const c = counts.find((x) => x.workspace === w.slug);
+    badges[w.slug] = c ? `${c._count._all}` : '0';
+  }
+
+  const land = await loadFactLandscape(userId, activeWorkspace);
   const empty = land.entities.length === 0;
+  const wsMeta =
+    WORKSPACES.find((w) => w.slug === activeWorkspace) ?? WORKSPACES[0];
 
   return (
     <main className="flex flex-1 flex-col px-6 py-10">
@@ -25,10 +56,16 @@ export default async function WorkspacePage() {
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="flex items-center gap-3">
               <h1 className="text-3xl font-semibold tracking-tight">
-                Northwind Software
+                {workspaceTitle(activeWorkspace)}
               </h1>
-              <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-400">
-                your org
+              <span
+                className={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-[0.14em] ${
+                  activeWorkspace === 'northwind'
+                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                    : 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-400'
+                }`}
+              >
+                {activeWorkspace === 'northwind' ? 'demo workspace' : 'qontext dataset'}
               </span>
             </div>
             <form
@@ -44,6 +81,19 @@ export default async function WorkspacePage() {
                 Sign out
               </button>
             </form>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <WorkspaceSwitcher
+              active={activeWorkspace}
+              workspaces={WORKSPACES}
+              badges={badges}
+            />
+            {wsMeta && (
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+                {wsMeta.description}
+              </span>
+            )}
           </div>
 
           {!empty && (
@@ -67,6 +117,16 @@ export default async function WorkspacePage() {
                   />
                 </>
               )}
+              {land.totalRedacted > 0 && (
+                <>
+                  <span className="text-zinc-300 dark:text-zinc-700">·</span>
+                  <Stat
+                    label="redacted"
+                    value={land.totalRedacted}
+                    tone="muted"
+                  />
+                </>
+              )}
             </div>
           )}
 
@@ -76,10 +136,19 @@ export default async function WorkspacePage() {
           </div>
         </header>
 
-        {empty ? <EmptyState /> : <Landscape entities={land.entities} />}
+        {empty ? (
+          <EmptyState workspace={activeWorkspace} />
+        ) : (
+          <Landscape entities={land.entities} workspace={activeWorkspace} />
+        )}
       </div>
     </main>
   );
+}
+
+function workspaceTitle(slug: string): string {
+  if (slug === 'inazuma') return 'Inazuma.co';
+  return 'Northwind Software';
 }
 
 function Stat({
@@ -107,29 +176,82 @@ function Stat({
   );
 }
 
-function EmptyState() {
+function EmptyState({ workspace }: { workspace: string }) {
   return (
     <div className="mt-12 rounded-2xl border border-dashed border-zinc-300 bg-white p-14 text-center dark:border-zinc-800 dark:bg-zinc-950">
       <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-400">
         empty workspace
       </p>
       <p className="mt-3 text-base text-zinc-700 dark:text-zinc-300">
-        No signed facts yet.
+        No signed facts yet in {workspace === 'inazuma' ? 'Inazuma' : 'Northwind'}.
       </p>
       <p className="mt-1 text-sm text-zinc-500">
-        Click <span className="font-medium">Sync now</span> to ingest from
-        Slack, Gmail, and the Q1 board deck.
+        {workspace === 'inazuma' ? (
+          <>
+            Run <code className="rounded bg-zinc-100 px-1 font-mono text-xs dark:bg-zinc-900">npx tsx scripts/ingest-qontext.ts --reset --no-audit</code>{' '}
+            to ingest the Qontext-supplied dataset.
+          </>
+        ) : (
+          <>
+            Click <span className="font-medium">Sync now</span> to ingest from
+            Slack, Gmail, and the Q1 board deck.
+          </>
+        )}
       </p>
     </div>
   );
 }
 
-function Landscape({ entities }: { entities: EntityGroup[] }) {
+/**
+ * The workspace landscape. Northwind has ~5 entities — render straight.
+ * Inazuma has 100+ entities — group "demo gold" entities (the planted
+ * conflict-rich set) on top, then collapse the long tail behind a
+ * <details> so the page stays readable from row 5 of the audience.
+ */
+const INAZUMA_DEMO_GOLD = new Set([
+  'inazuma',
+  'miller_group', 'gonzalez_inc', 'johnson_group',
+  'huang_llc', 'williams_group', 'martin_ltd',
+]);
+
+function Landscape({
+  entities,
+  workspace,
+}: {
+  entities: EntityGroup[];
+  workspace: string;
+}) {
+  if (workspace !== 'inazuma' || entities.length <= 12) {
+    return (
+      <div className="mt-10 space-y-12">
+        {entities.map((e, i) => (
+          <EntitySection key={e.slug} entity={e} primary={i === 0} />
+        ))}
+      </div>
+    );
+  }
+
+  const featured = entities.filter((e) => INAZUMA_DEMO_GOLD.has(e.slug));
+  const tail = entities.filter((e) => !INAZUMA_DEMO_GOLD.has(e.slug));
+
   return (
     <div className="mt-10 space-y-12">
-      {entities.map((e, i) => (
+      {featured.map((e, i) => (
         <EntitySection key={e.slug} entity={e} primary={i === 0} />
       ))}
+      <details className="group border-t border-zinc-200 pt-6 dark:border-zinc-900">
+        <summary className="flex cursor-pointer items-center gap-2 list-none font-mono text-[11px] uppercase tracking-[0.16em] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200">
+          <span aria-hidden className="select-none transition-transform group-open:rotate-90">
+            ›
+          </span>
+          {tail.length} more entities · audit-history accessible
+        </summary>
+        <div className="mt-6 space-y-12">
+          {tail.map((e) => (
+            <EntitySection key={e.slug} entity={e} />
+          ))}
+        </div>
+      </details>
     </div>
   );
 }

@@ -57,6 +57,8 @@ model VerificationToken {
 model FactEvent {
   id            String   @id
   userId        String
+  /** Workspace this fact belongs to. Multi-tenant federation: one user can hold facts from many companies in one ledger ('northwind', 'inazuma', ...). */
+  workspace     String   @default("northwind")
   entity        String
   claim         String
   metricKey     String?
@@ -76,7 +78,8 @@ model FactEvent {
   createdAt     DateTime @default(now())
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId, entity])
+  @@index([userId, workspace])
+  @@index([userId, workspace, entity])
   @@index([entity])
   @@index([parentHash])
 }
