@@ -16,6 +16,7 @@
 
 import { GoogleGenAI, Type } from '@google/genai';
 import { searchFacts } from './search';
+import { bootstrapVertexAuth } from './vertex-bootstrap';
 
 const MODEL = process.env.CANON_AUDIT_MODEL ?? 'gemini-2.5-flash';
 const TOP_K = 30;
@@ -24,6 +25,9 @@ const MAX_CONTEXT_CHARS = 12_000;
 let aiClient: GoogleGenAI | null = null;
 function getAi(): GoogleGenAI {
   if (aiClient) return aiClient;
+  // Materialise GOOGLE_APPLICATION_CREDENTIALS_JSON → tempfile if running
+  // on Railway (no on-disk gcloud ADC there). Idempotent + cheap.
+  bootstrapVertexAuth();
   const project = process.env.GOOGLE_CLOUD_PROJECT;
   const location = process.env.GOOGLE_CLOUD_LOCATION;
   if (!project || !location) {

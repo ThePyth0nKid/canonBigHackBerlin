@@ -13,6 +13,7 @@
 
 import { GoogleGenAI } from '@google/genai';
 import type { FactDraft } from './types';
+import { bootstrapVertexAuth } from './vertex-bootstrap';
 
 const MODEL = process.env.CANON_AUDIT_MODEL ?? 'gemini-2.5-flash';
 const MAX_CONTEXT_CHARS = 120_000;
@@ -21,6 +22,7 @@ let aiClient: GoogleGenAI | null = null;
 
 function getAi(): GoogleGenAI {
   if (aiClient) return aiClient;
+  bootstrapVertexAuth();
   const project = process.env.GOOGLE_CLOUD_PROJECT;
   const location = process.env.GOOGLE_CLOUD_LOCATION;
   if (!project || !location) {
