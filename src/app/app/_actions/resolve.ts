@@ -9,22 +9,53 @@ import { CanonSigner } from '@/lib/canon/sign';
 /**
  * User-pick conflict resolution.
  *
- * Persists a *signed* ResolutionEvent (status='resolution') anchored to the
- * tip of the user's hash chain — this makes the user's choice itself
- * cryptographically tamper-proof, not just a database flag. Then flips every
- * other competing active fact to 'superseded' with a notes pointer back to
- * the resolution's eventHash for traceability.
+ * Two outcomes a human can reach when staring at competing claims:
+ *   1. **canonical** — pick one as the source of truth. Emit a signed
+ *      ResolutionEvent at the chain tip; flip the rest to 'superseded'
+ *      with a notes pointer back to the resolution's eventHash.
+ *   2. **distinct** — the records aren't competing claims at all,
+ *      they're SEPARATE records that happen to share an entity slug
+ *      (same business name, different client_ids; same metric, different
+ *      time-windows; etc.). Emit a signed acknowledgement event tagged
+ *      `status='distinct'` — none of the original facts get superseded;
+ *      they all stay active. The audit chain records that a human
+ *      reviewed them and decided they were distinct.
+ *
+ * Both outcomes are signed events. Canon doesn't auto-merge identity —
+ * it surfaces provenance and records the human's call.
  */
-export async function resolveConflict(args: {
-  entity: string;
-  metricKey: string;
-  winnerFactId: string;
-}): Promise<{ ok: boolean; superseded: number; resolutionFactId?: string }> {
+export async function resolveConflict(args:
+  | {
+      mode: 'canonical';
+      entity: string;
+      metricKey: string;
+      winnerFactId: string;
+    }
+  | {
+      mode: 'distinct';
+      entity: string;
+      metricKey: string;
+      candidateFactIds: string[];
+    },
+): Promise<{ ok: boolean; superseded: number; resolutionFactId?: string }> {
   const session = await auth();
   if (!session?.user) return { ok: false, superseded: 0 };
   const userId = (session.user as { id?: string }).id;
   if (!userId) return { ok: false, superseded: 0 };
 
+  if (args.mode === 'canonical') {
+    return runCanonicalResolution({ ...args, userId });
+  }
+  return runDistinctRecords({ ...args, userId });
+}
+
+async function runCanonicalResolution(args: {
+  userId: string;
+  entity: string;
+  metricKey: string;
+  winnerFactId: string;
+}): Promise<{ ok: boolean; superseded: number; resolutionFactId?: string }> {
+  const { userId } = args;
   // Lookup the winner first — its workspace becomes the scope for everything
   // that follows. Without this scoping, picking ACME.seats=50 in Northwind
   // could accidentally supersede an unrelated huang_llc.industry fact in
@@ -56,7 +87,6 @@ export async function resolveConflict(args: {
     select: { id: true, metricValue: true },
   });
 
-  // Tip of the per-workspace chain — the new resolution event chains off it.
   const tail = await prisma.factEvent.findFirst({
     where: { userId, workspace },
     orderBy: { signedAt: 'desc' },
@@ -118,9 +148,87 @@ export async function resolveConflict(args: {
   ]);
 
   revalidatePath('/app');
-  return {
-    ok: true,
-    superseded: losers.length,
-    resolutionFactId,
-  };
+  return { ok: true, superseded: losers.length, resolutionFactId };
+}
+
+async function runDistinctRecords(args: {
+  userId: string;
+  entity: string;
+  metricKey: string;
+  candidateFactIds: string[];
+}): Promise<{ ok: boolean; superseded: number; resolutionFactId?: string }> {
+  const { userId } = args;
+  if (!args.candidateFactIds || args.candidateFactIds.length < 2) {
+    return { ok: false, superseded: 0 };
+  }
+
+  // Workspace from the first candidate (all should be in the same workspace
+  // since the conflict modal scopes by workspace already).
+  const seed = await prisma.factEvent.findFirst({
+    where: { id: args.candidateFactIds[0], userId },
+    select: { workspace: true, metricUnit: true },
+  });
+  if (!seed) return { ok: false, superseded: 0 };
+  const workspace = seed.workspace;
+
+  const tail = await prisma.factEvent.findFirst({
+    where: { userId, workspace },
+    orderBy: { signedAt: 'desc' },
+    select: { eventHash: true },
+  });
+  const parentHash = tail?.eventHash ?? '';
+
+  const signer = new CanonSigner();
+  signer.start();
+  const resolutionFactId = `f_dist_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const claim = `Records reviewed and confirmed DISTINCT: ${args.entity}.${args.metricKey} (${args.candidateFactIds.length} independent records — none supersedes another). Same entity slug, different source records.`;
+  const sourceRef = `resolution:distinct:${userId}`;
+
+  let signRes;
+  try {
+    signRes = await signer.sign({
+      factId: resolutionFactId,
+      entity: args.entity,
+      claim,
+      sourceRef,
+      sourceExcerpt: claim,
+      parentHash,
+      createdAtMs: Date.now(),
+    });
+  } finally {
+    await signer.close();
+  }
+
+  // Note on each candidate: distinct-records pointer. Don't supersede.
+  await prisma.$transaction([
+    prisma.factEvent.create({
+      data: {
+        id: resolutionFactId,
+        userId,
+        workspace,
+        entity: args.entity,
+        claim,
+        metricKey: args.metricKey,
+        metricValue: null,
+        metricUnit: null,
+        sourceRef,
+        sourceExcerpt: claim,
+        parentHash: parentHash || null,
+        eventHash: signRes.eventHash,
+        coseSign1Hex: signRes.coseSign1Hex,
+        signerPubkey: signRes.signerPubkey,
+        signedAt: new Date(signRes.signedAtMs),
+        observedAt: new Date(),
+        status: 'resolution',
+        notes: `resolution:distinct:candidates=${args.candidateFactIds.join(',')}`,
+      },
+    }),
+    prisma.factEvent.updateMany({
+      where: { id: { in: args.candidateFactIds } },
+      data: { notes: `distinct:reviewed:${signRes.eventHash}` },
+    }),
+  ]);
+
+  revalidatePath('/app');
+  return { ok: true, superseded: 0, resolutionFactId };
 }
