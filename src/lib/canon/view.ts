@@ -116,6 +116,21 @@ export interface FactStats {
   totalEntities: number;
 }
 
+export interface SourceStatus {
+  /** sourceRef prefix this row covers (slack | gmail | pdf | qontext | resolution). */
+  kind: string;
+  displayName: string;
+  /** What is this source bound to (account email, channel id, file name…). */
+  account: string | null;
+  /** The query / filter Canon applies when pulling from this source. */
+  filter: string | null;
+  /** ISO timestamp of the most-recent fact from this source — null if never synced. */
+  lastFactAt: string | null;
+  factCount: number;
+  /** True if a credential is in place to actually pull from this source live. */
+  ready: boolean;
+}
+
 /**
  * Fast aggregate stats for the page header — no per-row fetch. Runs as 4
  * count queries + 1 distinct-entity scan; ~50-200ms even on 8000+ facts.
@@ -183,6 +198,97 @@ export async function loadFactStats(
     unresolvedConflicts,
     totalEntities: distinctEntities.length,
   };
+}
+
+/**
+ * Per-source health for the "Connected sources" panel. Counts active facts
+ * grouped by sourceRef prefix (slack/gmail/pdf/qontext) and joins each
+ * row with a one-shot recency probe so the UI can render a "last sync"
+ * timestamp without dragging the full ledger.
+ *
+ * Filters / accounts are rendered from env + DB lookups so the audience
+ * can see EXACTLY what query Canon runs against each upstream.
+ */
+export async function loadSourceStatuses(
+  userId: string,
+  workspace: string = 'inazuma',
+): Promise<SourceStatus[]> {
+  const baseWhere = { userId, workspace, status: 'active' as const };
+
+  // Group active facts by source prefix using sourceRef LIKE — Prisma's
+  // groupBy doesn't support computed columns, so we do one count per kind.
+  const kinds = ['slack', 'gmail', 'pdf', 'qontext'] as const;
+  const perKind = await Promise.all(
+    kinds.map(async (kind) => {
+      const [count, latest] = await Promise.all([
+        prisma.factEvent.count({
+          where: { ...baseWhere, sourceRef: { startsWith: `${kind}:` } },
+        }),
+        prisma.factEvent.findFirst({
+          where: { ...baseWhere, sourceRef: { startsWith: `${kind}:` } },
+          orderBy: { signedAt: 'desc' },
+          select: { signedAt: true, sourceRef: true },
+        }),
+      ]);
+      return { kind, count, latest };
+    }),
+  );
+
+  // Live Gmail account — pulled from the OAuth row NextAuth wrote when
+  // the user signed in. Presence of access_token = "ready" for the live
+  // adapter; absence (or missing scope) = degraded.
+  const gmailAccount = await prisma.account.findFirst({
+    where: { userId, provider: 'google', access_token: { not: null } },
+    select: { scope: true },
+  });
+  const gmailUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true },
+  });
+
+  const slackChannel = process.env.SLACK_DEMO_CHANNEL ?? 'C0B058UN0PK';
+  const slackReady = !!process.env.SLACK_USER_TOKEN;
+
+  const out: SourceStatus[] = [];
+  for (const k of perKind) {
+    const display: Record<typeof k.kind, { name: string; account: string | null; filter: string | null; ready: boolean }> = {
+      slack: {
+        name: 'Slack',
+        account: `#sales · ${slackChannel}`,
+        filter: 'conversations.history (latest 100 messages)',
+        ready: slackReady,
+      },
+      gmail: {
+        name: 'Gmail',
+        account: gmailUser?.email ?? '(not signed in)',
+        filter: 'subject:"[canon-demo]" (max 25 messages)',
+        ready: !!gmailAccount && (gmailAccount.scope ?? '').includes('gmail.readonly'),
+      },
+      pdf: {
+        name: 'PDF',
+        account: 'demo/q1-board-deck.pdf (synthetic Q1 board deck)',
+        filter: 'all pages',
+        ready: true,
+      },
+      qontext: {
+        name: 'Qontext dataset',
+        account: 'demo/qontext/Dataset/* (synthetic Inazuma corp data)',
+        filter: 'top-100 hero products + clients/vendors/policies/invoices',
+        ready: true,
+      },
+    } as const;
+    const meta = display[k.kind];
+    out.push({
+      kind: k.kind,
+      displayName: meta.name,
+      account: meta.account,
+      filter: meta.filter,
+      lastFactAt: k.latest?.signedAt?.toISOString() ?? null,
+      factCount: k.count,
+      ready: meta.ready,
+    });
+  }
+  return out;
 }
 
 /**

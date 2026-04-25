@@ -5,14 +5,15 @@ import {
   loadEntitiesBySlugs,
   loadEntitySlugsOrdered,
   loadFactStats,
+  loadSourceStatuses,
   WORKSPACES,
-  type FactStats,
 } from '@/lib/canon/view';
 import { AikidoRepoBanner } from './_components/aikido-banner';
 import { SyncButton } from './_components/sync-button';
 import { FileDropIngest } from './_components/file-drop-ingest';
 import { EntitySection } from './_components/entity-section';
 import { TailLoader } from './_components/tail-loader';
+import { ConnectedSources } from './_components/connected-sources';
 
 export const dynamic = 'force-dynamic';
 
@@ -72,6 +73,12 @@ export default async function WorkspacePage() {
             <SyncButton />
           </div>
 
+          {/* Connected sources panel: Suspense so it doesn't gate the
+              header on the per-source recency probes. */}
+          <Suspense fallback={null}>
+            <ConnectedSourcesRow userId={userId} workspace={activeWorkspace} />
+          </Suspense>
+
           <div className="border-t border-zinc-200 pt-4 dark:border-zinc-900">
             <AikidoRepoBanner />
           </div>
@@ -93,6 +100,17 @@ export default async function WorkspacePage() {
       </div>
     </main>
   );
+}
+
+async function ConnectedSourcesRow({
+  userId,
+  workspace,
+}: {
+  userId: string;
+  workspace: string;
+}) {
+  const sources = await loadSourceStatuses(userId, workspace);
+  return <ConnectedSources sources={sources} />;
 }
 
 async function StatsRow({
