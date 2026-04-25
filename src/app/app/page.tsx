@@ -132,7 +132,16 @@ export default async function WorkspacePage({
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-900">
             <AikidoRepoBanner />
-            <SyncButton />
+            {activeWorkspace === 'northwind' ? (
+              <SyncButton />
+            ) : (
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">
+                pre-loaded · re-ingest via{' '}
+                <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-900">
+                  scripts/ingest-qontext.ts
+                </code>
+              </span>
+            )}
           </div>
         </header>
 

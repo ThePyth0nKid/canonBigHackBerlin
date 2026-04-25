@@ -94,13 +94,21 @@ async function resolveDemoUserId(): Promise<string> {
 // Tool implementations
 // ---------------------------------------------------------------------------
 
-async function canonLookup(entityArg: string) {
+const DEFAULT_WORKSPACE = 'northwind';
+
+function normalizeWorkspace(input: string | undefined): string {
+  const v = (input ?? DEFAULT_WORKSPACE).trim().toLowerCase();
+  return v || DEFAULT_WORKSPACE;
+}
+
+async function canonLookup(entityArg: string, workspace?: string) {
   const userId = await resolveDemoUserId();
+  const ws = normalizeWorkspace(workspace);
   const slug = entityArg.trim().toLowerCase();
   if (!slug) return errorBlock('entity is required');
 
   const rows = await prisma.factEvent.findMany({
-    where: { userId, entity: slug, status: 'active' },
+    where: { userId, workspace: ws, entity: slug, status: 'active' },
     orderBy: { signedAt: 'asc' },
   });
 
@@ -109,6 +117,7 @@ async function canonLookup(entityArg: string) {
     const fuzzy = await prisma.factEvent.findMany({
       where: {
         userId,
+        workspace: ws,
         status: 'active',
         entity: { contains: slug, mode: 'insensitive' },
       },
@@ -116,27 +125,56 @@ async function canonLookup(entityArg: string) {
       take: 50,
     });
     if (fuzzy.length === 0) {
+      const known = await listKnownEntities(userId, ws);
       return textBlock(
-        `No facts found for entity "${entityArg}". Known entities for this workspace: ` +
-          (await listKnownEntities(userId)).join(', '),
+        `No facts found for entity "${entityArg}" in workspace "${ws}". ` +
+          `Known entities here: ${known.slice(0, 30).join(', ')}` +
+          (known.length > 30 ? ` (+${known.length - 30} more)` : '') +
+          `. To switch workspace, pass workspace:"northwind" or workspace:"inazuma".`,
       );
     }
-    return textBlock(formatLookup(slug, fuzzy));
+    return textBlock(formatLookup(slug, ws, fuzzy));
   }
 
-  return textBlock(formatLookup(slug, rows));
+  return textBlock(formatLookup(slug, ws, rows));
 }
 
-async function listKnownEntities(userId: string): Promise<string[]> {
+async function listKnownEntities(userId: string, workspace: string): Promise<string[]> {
   const distinct = await prisma.factEvent.findMany({
-    where: { userId, status: 'active' },
+    where: { userId, workspace, status: 'active' },
     select: { entity: true },
     distinct: ['entity'],
   });
   return distinct.map((d) => d.entity);
 }
 
-function formatLookup(slug: string, rows: Array<{
+async function canonWorkspaces() {
+  const userId = await resolveDemoUserId();
+  const counts = await prisma.factEvent.groupBy({
+    by: ['workspace'],
+    where: { userId, status: 'active' },
+    _count: { _all: true },
+  });
+  if (counts.length === 0) {
+    return textBlock(
+      'No workspaces yet. Run the ingest scripts to populate Northwind or Inazuma.',
+    );
+  }
+  const lines: string[] = [];
+  lines.push('# Canon workspaces');
+  lines.push('');
+  for (const c of counts.sort((a, b) => b._count._all - a._count._all)) {
+    const label = c.workspace === 'inazuma' ? 'Inazuma.co (Qontext-supplied dataset)' : 'Northwind Software (demo)';
+    lines.push(`- **${c.workspace}** · ${c._count._all} active facts · ${label}`);
+  }
+  lines.push('');
+  lines.push(
+    'Use `canon_lookup({ entity, workspace })` to scope a query. Default workspace is "northwind".',
+  );
+  return textBlock(lines.join('\n'));
+}
+
+function formatLookup(slug: string, workspace: string, rows: Array<{
   id: string;
   entity: string;
   claim: string;
@@ -146,7 +184,7 @@ function formatLookup(slug: string, rows: Array<{
 }>): string {
   const display = entityDisplay(slug);
   const lines: string[] = [];
-  lines.push(`# Canon facts about ${display} (${slug}) — ${rows.length} active fact(s)`);
+  lines.push(`# Canon facts about ${display} (${slug}) — ${rows.length} active fact(s) · workspace: ${workspace}`);
   lines.push('');
   for (const r of rows) {
     const kind = sourceKindOf(r.sourceRef);
@@ -165,14 +203,16 @@ function formatLookup(slug: string, rows: Array<{
   return lines.join('\n');
 }
 
-async function canonSearch(query: string) {
+async function canonSearch(query: string, workspace?: string) {
   const userId = await resolveDemoUserId();
+  const ws = normalizeWorkspace(workspace);
   const q = query.trim();
   if (!q) return errorBlock('query is required');
 
   const rows = await prisma.factEvent.findMany({
     where: {
       userId,
+      workspace: ws,
       status: 'active',
       OR: [
         { claim: { contains: q, mode: 'insensitive' } },
@@ -185,11 +225,13 @@ async function canonSearch(query: string) {
   });
 
   if (rows.length === 0) {
-    return textBlock(`No active Canon facts match "${q}".`);
+    return textBlock(
+      `No active Canon facts match "${q}" in workspace "${ws}". Try workspace:"${ws === 'inazuma' ? 'northwind' : 'inazuma'}".`,
+    );
   }
 
   const lines: string[] = [];
-  lines.push(`# Canon search "${q}" — ${rows.length} hit(s)`);
+  lines.push(`# Canon search "${q}" — ${rows.length} hit(s) · workspace: ${ws}`);
   lines.push('');
   for (const r of rows) {
     lines.push(
@@ -242,21 +284,22 @@ async function canonCite(factId: string) {
   return textBlock(block);
 }
 
-async function canonDiff(entityArg: string, sinceISO: string) {
+async function canonDiff(entityArg: string, sinceISO: string, workspace?: string) {
   const userId = await resolveDemoUserId();
+  const ws = normalizeWorkspace(workspace);
   const slug = entityArg.trim().toLowerCase();
   const since = new Date(sinceISO);
   if (!slug) return errorBlock('entity is required');
   if (Number.isNaN(since.getTime())) return errorBlock(`since is not a valid ISO date: ${sinceISO}`);
 
   const rows = await prisma.factEvent.findMany({
-    where: { userId, entity: slug, signedAt: { gte: since } },
+    where: { userId, workspace: ws, entity: slug, signedAt: { gte: since } },
     orderBy: { signedAt: 'asc' },
   });
 
   if (rows.length === 0) {
     return textBlock(
-      `No Canon facts about "${entityArg}" signed since ${since.toISOString()}.`,
+      `No Canon facts about "${entityArg}" signed since ${since.toISOString()} in workspace "${ws}".`,
     );
   }
 
@@ -356,6 +399,21 @@ async function main() {
   );
 
   server.registerTool(
+    'canon_workspaces',
+    {
+      title: 'Canon — list available workspaces',
+      description:
+        '[CALL THIS when the user asks "what workspaces are available", "what data does Canon have", ' +
+        'or when you need to disambiguate which workspace an entity lives in.] ' +
+        'Returns the list of Canon workspaces with their active fact counts. Today: northwind ' +
+        '(demo: Slack/Gmail/PDF) + inazuma (Qontext-supplied enterprise dataset). ' +
+        'Pass `workspace` to canon_lookup / canon_search / canon_diff to scope a query — default is "northwind".',
+      inputSchema: {},
+    },
+    async () => canonWorkspaces(),
+  );
+
+  server.registerTool(
     'canon_lookup',
     {
       title: 'Canon — lookup business entity',
@@ -363,19 +421,26 @@ async function main() {
         '[CALL THIS FIRST for any question about a CUSTOMER, COMPANY, ACCOUNT, DEAL, or BUSINESS ENTITY by name.] ' +
         'Returns the user\'s cryptographically signed Canon facts about an entity — every claim is Ed25519-signed, ' +
         'hash-chained, and carries a sourceRef + factId + eventHash. ' +
+        'Multi-workspace: pass `workspace: "inazuma"` for the Qontext-supplied enterprise dataset, default is "northwind". ' +
+        'When unsure which workspace, call canon_workspaces() first. ' +
         'Examples of when to call this BEFORE grep / file search: ' +
         '"What do we know about ACME?", "Tell me about Northwind", "What\'s the status on TechCo?", ' +
-        '"What is X\'s renewal date / MRR / ACV / seat count?", "Customer X facts with proof". ' +
-        'Canon is the workspace\'s signed source-of-truth for business facts; only fall back to file search if Canon returns no facts.',
+        '"Miller Group industry conflict?", "Inazuma clients in Manufacturing?".',
       inputSchema: {
         entity: z
           .string()
           .describe(
-            "Entity slug (lowercase) or display name. E.g. 'northwind', 'acme', 'techco', 'ACME GmbH'.",
+            "Entity slug (lowercase) or display name. E.g. 'northwind', 'acme', 'miller_group', 'ACME GmbH'.",
+          ),
+        workspace: z
+          .string()
+          .optional()
+          .describe(
+            'Workspace slug. "northwind" (default, demo) or "inazuma" (Qontext dataset). Call canon_workspaces() to discover.',
           ),
       },
     },
-    async ({ entity }) => canonLookup(entity),
+    async ({ entity, workspace }) => canonLookup(entity, workspace),
   );
 
   server.registerTool(
@@ -390,9 +455,15 @@ async function main() {
         'Returns top 20 hits with sources + factIds. Prefer Canon over grep for any business / customer / metric question.',
       inputSchema: {
         query: z.string().describe('Free text to match against claim / sourceExcerpt / entity (case-insensitive substring).'),
+        workspace: z
+          .string()
+          .optional()
+          .describe(
+            'Workspace slug. "northwind" (default) or "inazuma" (Qontext dataset).',
+          ),
       },
     },
-    async ({ query }) => canonSearch(query),
+    async ({ query, workspace }) => canonSearch(query, workspace),
   );
 
   server.registerTool(
@@ -423,9 +494,13 @@ async function main() {
       inputSchema: {
         entity: z.string().describe("Entity slug (lowercase), e.g. 'northwind'."),
         since: z.string().describe('ISO 8601 date/time, e.g. "2026-04-20" or "2026-04-20T00:00:00Z".'),
+        workspace: z
+          .string()
+          .optional()
+          .describe('Workspace slug. "northwind" (default) or "inazuma".'),
       },
     },
-    async ({ entity, since }) => canonDiff(entity, since),
+    async ({ entity, since, workspace }) => canonDiff(entity, since, workspace),
   );
 
   server.registerTool(
