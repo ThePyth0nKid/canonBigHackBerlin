@@ -15,7 +15,7 @@
  */
 
 import { GoogleGenAI, Type } from '@google/genai';
-import { searchFacts } from './search';
+import { searchFacts, type SearchResult } from './search';
 import { bootstrapVertexAuth } from './vertex-bootstrap';
 
 const MODEL = process.env.CANON_AUDIT_MODEL ?? 'gemini-2.5-flash';
@@ -47,6 +47,11 @@ export interface CanonCitation {
   metricValue: string | null;
   signedAt: Date;
   eventHash: string;
+  /** When this row came from a cluster (corroboration/conflict aggregation):
+   *  total facts in the cluster + cluster shape. Lets the UI render
+   *  "18 facts agree" or "2 competing values" badges. */
+  clusterCount?: number;
+  clusterKind?: 'corroboration' | 'conflict';
 }
 
 export interface CanonAnswer {
@@ -68,8 +73,10 @@ Hard rules:
 - Every quantitative claim or named entity in your answer MUST be backed by an inline citation in the form [f_XXXXX] where f_XXXXX is a factId from the list provided.
 - DO NOT invent facts not in the list. If the available facts don't answer the question, say so explicitly and suggest a more specific question.
 - Be terse. 1–4 sentences. Plain language. No emojis.
-- When the question is about a CONFLICT (multiple values for the same metric), surface that explicitly: "two competing values, [f_A] vs [f_B]".
+- If a fact is annotated [N facts agree], that means N independent signed facts in the ledger share the same value — surface this explicitly in the answer ("18 facts agree on price ₹1999 [f_…]") because cluster size is the load-bearing trust signal.
+- If a fact is annotated [conflict: N distinct values], surface that explicitly: "Miller Group has N competing industries, [f_A]=Manufacturing vs [f_B]=Entertainment".
 - If the user asks for cryptographic proof / source, point them at the cited factId and remind them they can call canon_cite for the COSE_Sign1 envelope.
+- Match the user's language: if they asked in German, answer in German; if in English, English.
 
 Output JSON:
 {"answer": string, "citedFactIds": string[], "confidence": "high" | "medium" | "low"}
@@ -88,15 +95,21 @@ const RESPONSE_SCHEMA = {
 
 /**
  * Retrieve top-K facts via the SHARED searchFacts() lib so MCP and the
- * Ask-Canon UI use bit-identical ranking (entity-boost included). Trim
- * by char budget so the Gemini prompt stays under a sensible cap.
+ * Ask-Canon UI use bit-identical ranking (entity-boost + intent-aware
+ * aggregation paths). Trim by char budget so the Gemini prompt stays
+ * under a sensible cap. Cluster metadata (size + kind) is preserved so
+ * the prompt can render "[N facts agree]" or "[conflict: N values]"
+ * inline next to each fact.
  */
 async function retrieve(
   userId: string,
   workspace: string,
   question: string,
 ): Promise<CanonCitation[]> {
-  const rows = await searchFacts(userId, question, { workspace, limit: 200 });
+  const rows: SearchResult[] = await searchFacts(userId, question, {
+    workspace,
+    limit: 200,
+  });
   const out: CanonCitation[] = [];
   let chars = 0;
   for (const row of rows) {
@@ -114,6 +127,8 @@ async function retrieve(
       metricValue: row.metricValue,
       signedAt: row.signedAt,
       eventHash: row.eventHash,
+      clusterCount: row.clusterCount,
+      clusterKind: row.clusterKind,
     });
   }
   return out;
@@ -160,9 +175,19 @@ export async function askCanon(args: {
       const ex = c.sourceExcerpt
         ? c.sourceExcerpt.replace(/\s+/g, ' ').trim().slice(0, 180)
         : '';
+      // Cluster annotation surfaces the aggregation context to Gemini so
+      // it can quote "[N facts agree]" verbatim. The retrieval already
+      // sampled at most 5 facts per cluster; the count here is the FULL
+      // number in the ledger, not the sample.
+      const cluster = c.clusterCount
+        ? c.clusterKind === 'corroboration'
+          ? `   [${c.clusterCount} facts agree on this value]`
+          : `   [conflict: ${c.clusterCount} distinct values for this entity+metric]`
+        : '';
       return [
         `#${i + 1} factId=${c.factId}`,
         `   entity=${c.entity} ${k}${v}`,
+        cluster,
         `   claim=${c.claim}`,
         `   source=${c.sourceRef}`,
         ex ? `   excerpt="${ex}"` : '',
