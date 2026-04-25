@@ -29,19 +29,27 @@ export default async function WorkspacePage({
   if (!userId) redirect('/login');
 
   const sp = await searchParams;
-  const wsParam = sp?.ws ?? 'northwind';
+  const wsParam = sp?.ws ?? 'all';
   const activeWorkspace =
-    WORKSPACES.find((w) => w.slug === wsParam)?.slug ?? 'northwind';
+    WORKSPACES.find((w) => w.slug === wsParam)?.slug ?? 'all';
 
-  // Per-workspace fact counts for the switcher badges (one extra cheap query
-  // — gives jurors the "two workspaces, one ledger" beat at a glance).
+  // Per-workspace fact counts for the switcher badges. The 'all' badge
+  // is the row total — every chain combined — so the unified view
+  // shows "All sources · 3107" while individual chains show their own
+  // counts.
   const counts = await prisma.factEvent.groupBy({
     by: ['workspace'],
     where: { userId, status: 'active' },
     _count: { _all: true },
   });
   const badges: Record<string, string> = {};
+  let total = 0;
+  for (const c of counts) total += c._count._all;
   for (const w of WORKSPACES) {
+    if (w.slug === 'all') {
+      badges[w.slug] = `${total}`;
+      continue;
+    }
     const c = counts.find((x) => x.workspace === w.slug);
     badges[w.slug] = c ? `${c._count._all}` : '0';
   }
@@ -60,12 +68,18 @@ export default async function WorkspacePage({
               </h1>
               <span
                 className={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium uppercase tracking-[0.14em] ${
-                  activeWorkspace === 'northwind'
-                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
-                    : 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-400'
+                  activeWorkspace === 'all'
+                    ? 'border-zinc-500/40 bg-zinc-500/10 text-zinc-700 dark:text-zinc-300'
+                    : activeWorkspace === 'northwind'
+                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                      : 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-400'
                 }`}
               >
-                {activeWorkspace === 'northwind' ? 'demo workspace' : 'qontext dataset'}
+                {activeWorkspace === 'all'
+                  ? 'unified ledger'
+                  : activeWorkspace === 'northwind'
+                    ? 'synthetic CFO'
+                    : 'qontext dataset'}
               </span>
             </div>
             <form
@@ -102,7 +116,7 @@ export default async function WorkspacePage({
           </div>
 
           {activeWorkspace !== 'northwind' && (
-            <FileDropIngest workspace={activeWorkspace as 'inazuma'} />
+            <FileDropIngest workspace={uploadTarget(activeWorkspace)} />
           )}
         </header>
 
@@ -199,8 +213,20 @@ function LandscapeSkeleton({ workspace }: { workspace: string }) {
 }
 
 function workspaceTitle(slug: string): string {
+  if (slug === 'all') return 'Your business · canonized';
   if (slug === 'inazuma') return 'Inazuma.co';
   return 'Northwind Software';
+}
+
+/**
+ * The drop-zone lives on the unified view + the inazuma view. From 'all'
+ * we route uploads into the dedicated 'main' workspace so the user's own
+ * data stays distinct from the two synthetic demo chains. Picking the
+ * 'inazuma' tab still routes uploads into 'inazuma' for jurors who want
+ * to see uploads merged into the Qontext dataset.
+ */
+function uploadTarget(active: string): 'main' | 'inazuma' {
+  return active === 'inazuma' ? 'inazuma' : 'main';
 }
 
 function Stat({
@@ -235,20 +261,16 @@ function EmptyState({ workspace }: { workspace: string }) {
         empty workspace
       </p>
       <p className="mt-3 text-base text-zinc-700 dark:text-zinc-300">
-        No signed facts yet in {workspace === 'inazuma' ? 'Inazuma' : 'Northwind'}.
+        {workspace === 'all'
+          ? 'No signed facts yet — your unified view is empty.'
+          : workspace === 'northwind'
+            ? 'Northwind chain is empty.'
+            : 'Inazuma chain is empty.'}
       </p>
       <p className="mt-1 text-sm text-zinc-500">
-        {workspace === 'inazuma' ? (
-          <>
-            Run <code className="rounded bg-zinc-100 px-1 font-mono text-xs dark:bg-zinc-900">npx tsx scripts/ingest-qontext.ts --reset --no-audit</code>{' '}
-            to ingest the Qontext-supplied dataset.
-          </>
-        ) : (
-          <>
-            Click <span className="font-medium">Sync now</span> to ingest from
-            Slack, Gmail, and the Q1 board deck.
-          </>
-        )}
+        {workspace === 'northwind'
+          ? 'Click Sync now to ingest from Slack, Gmail, and the Q1 board deck.'
+          : 'Drop a file or folder above to ingest your own data.'}
       </p>
     </div>
   );
@@ -273,7 +295,7 @@ function Landscape({
   entities: EntityGroup[];
   workspace: string;
 }) {
-  if (workspace !== 'inazuma' || entities.length <= 12) {
+  if (entities.length <= 12) {
     return (
       <div className="mt-10 space-y-12">
         {entities.map((e, i) => (
@@ -283,8 +305,19 @@ function Landscape({
     );
   }
 
-  const featured = entities.filter((e) => INAZUMA_DEMO_GOLD.has(e.slug));
-  const tail = entities.filter((e) => !INAZUMA_DEMO_GOLD.has(e.slug));
+  // Featured rotates by view: 'all' surfaces the Northwind primary
+  // entities (the synthetic CFO chain) AND the Inazuma demo-gold ones
+  // up top, then collapses everything else. Same pattern, two chains.
+  const NORTHWIND_FEATURED = new Set([
+    'northwind', 'acme', 'techco', 'globex', 'initech', 'umbrella', 'soylent',
+  ]);
+  const featuredSet =
+    workspace === 'all'
+      ? new Set([...NORTHWIND_FEATURED, ...INAZUMA_DEMO_GOLD])
+      : INAZUMA_DEMO_GOLD;
+
+  const featured = entities.filter((e) => featuredSet.has(e.slug));
+  const tail = entities.filter((e) => !featuredSet.has(e.slug));
 
   return (
     <div className="mt-10 space-y-12">

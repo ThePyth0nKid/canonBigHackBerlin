@@ -1,32 +1,38 @@
 /**
  * POST /api/ingest-upload — multipart file upload → live SSE ingest.
  *
- * The user drags-and-drops (or picks) a file in /app. Browser POSTs it
- * here as multipart/form-data with two parts:
- *   - file:      the actual file
- *   - workspace: the FactEvent.workspace tag to land the facts under
- *                (default: "inazuma" — the demo target)
+ * Accepts ONE or MANY files in a single request. The browser bundles
+ * all dropped files (or a whole folder traversal) into a single
+ * multipart body so we run the pipeline once over the union of their
+ * drafts — not N times round-tripping the whole stack.
+ *
+ *   Form fields:
+ *     - files       — repeatable; each part is one File
+ *     - workspace   — destination FactEvent.workspace tag (default 'main')
  *
  * Phases (each emitted as `data: {...}\n\n`):
- *   1. init     — workspace resolution, capacity check
- *   2. parse    — file → drafts/chunks via the upload router
- *   3. extract  — Pioneer over free-form chunks (omitted when 0)
- *   4. sign     — per-fact signed + persisted; emits a `fact` payload
- *                 every event so the UI can render streaming rows
+ *   1. init     — total bytes / file count / workspace
+ *   2. parse    — per-file parse with progress (done/total = file index)
+ *   3. extract  — Pioneer over the union of free-form chunks (omitted when 0)
+ *   4. sign     — per-fact signed + persisted; emits `fact` payload every event
  *   5. conflict — workspace-scoped conflict pass after persistence
- *   6. done     — summary stats incl. links into the resolve modal
+ *   6. done     — aggregate stats incl. links into the resolve modal
  *
- * No reset: every upload appends. The user can drop multiple files
- * back-to-back to demonstrate cross-source conflict emergence.
+ * No reset: every upload appends. Drop additional files / folders to
+ * extend the workspace and watch cross-source conflicts emerge.
  */
 
 import { NextResponse } from 'next/server';
 import { auth } from '@/auth';
-import { extractFactsFromChunks } from '@/lib/canon/pioneer';
+import { extractFactsFromChunks, type Chunk } from '@/lib/canon/pioneer';
+import type { FactDraft } from '@/lib/canon/types';
 import { CanonSigner } from '@/lib/canon/sign';
 import { runPipeline } from '@/lib/canon/pipeline';
 import { resolveUserConflicts } from '@/lib/canon/conflicts';
-import { parseUploadedFile } from '@/lib/ingest/upload';
+import {
+  parseUploadedFile,
+  type UploadParseResult,
+} from '@/lib/ingest/upload';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -55,7 +61,16 @@ interface ProgressEvent {
   };
 }
 
-const ALLOWED_WORKSPACES = new Set(['inazuma', 'northwind', 'upload']);
+const ALLOWED_WORKSPACES = new Set([
+  'main',
+  'inazuma',
+  'northwind',
+  'upload',
+]);
+
+/** Hard cap to keep one POST from over-burning the Pioneer / signer budget. */
+const MAX_TOTAL_FILES = 1000;
+const MAX_TOTAL_BYTES = 200 * 1024 * 1024; // 200 MB
 
 export async function POST(req: Request) {
   const session = await auth();
@@ -64,18 +79,41 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
 
-  // Pre-validate the multipart payload BEFORE opening the SSE stream so
-  // we can return a real HTTP 4xx instead of a swallowed in-stream error.
-  let file: File;
+  // Parse multipart up-front so we can return real 4xx for bad payloads
+  // instead of swallowing the error inside an SSE stream the client may
+  // not surface usefully.
+  let files: File[];
   let workspace: string;
   try {
     const fd = await req.formData();
-    const f = fd.get('file');
-    if (!(f instanceof File) || f.size === 0) {
-      return NextResponse.json({ error: 'missing file' }, { status: 400 });
+    const raw = fd.getAll('files');
+    files = raw.filter((f): f is File => f instanceof File && f.size > 0);
+    if (files.length === 0) {
+      return NextResponse.json(
+        { error: 'no files received (use form field "files")' },
+        { status: 400 },
+      );
     }
-    file = f;
-    const ws = (fd.get('workspace') as string | null) ?? 'inazuma';
+    if (files.length > MAX_TOTAL_FILES) {
+      return NextResponse.json(
+        {
+          error: `too many files (${files.length}); cap is ${MAX_TOTAL_FILES} per request`,
+        },
+        { status: 400 },
+      );
+    }
+    const totalBytes = files.reduce((s, f) => s + f.size, 0);
+    if (totalBytes > MAX_TOTAL_BYTES) {
+      return NextResponse.json(
+        {
+          error: `payload too large (${(totalBytes / 1024 / 1024).toFixed(1)} MB); cap is ${
+            MAX_TOTAL_BYTES / 1024 / 1024
+          } MB per request`,
+        },
+        { status: 413 },
+      );
+    }
+    const ws = (fd.get('workspace') as string | null) ?? 'main';
     if (!ALLOWED_WORKSPACES.has(ws)) {
       return NextResponse.json(
         { error: `workspace must be one of: ${[...ALLOWED_WORKSPACES].join(', ')}` },
@@ -99,61 +137,133 @@ export async function POST(req: Request) {
         try {
           controller.enqueue(enc.encode(`data: ${JSON.stringify(event)}\n\n`));
         } catch {
-          // controller closed already (client disconnected) — ignore
+          // controller closed (client disconnected) — silently drop.
         }
       };
 
       const t0 = Date.now();
       try {
+        const totalBytes = files.reduce((s, f) => s + f.size, 0);
         send({
           phase: 'init',
-          message: `Receiving ${file.name} (${(file.size / 1024).toFixed(1)} KB)…`,
+          message: `Receiving ${files.length} file${
+            files.length === 1 ? '' : 's'
+          } (${(totalBytes / 1024 / 1024).toFixed(1)} MB)…`,
           data: {
-            filename: file.name,
-            size: file.size,
             workspace,
+            fileCount: files.length,
+            totalBytes,
           },
         });
 
-        // ----- parse -----
-        send({ phase: 'parse', message: 'Detecting filetype + record shape…' });
-        const parsed = await parseUploadedFile(file);
+        // ----- parse each file (sequential so SSE updates land in order) -----
+        const allDirectDrafts: FactDraft[] = [];
+        const allChunks: Chunk[] = [];
+        const perFileSummary: Array<{
+          filename: string;
+          shape: UploadParseResult['shape'];
+          records: number;
+          drafts: number;
+          chunks: number;
+          error?: string;
+        }> = [];
         send({
           phase: 'parse',
-          message: `Detected ${parsed.shape} (${parsed.recordCount} records).`,
+          message: `Parsing ${files.length} file${files.length === 1 ? '' : 's'}…`,
+          done: 0,
+          total: files.length,
+        });
+        for (let i = 0; i < files.length; i++) {
+          const f = files[i];
+          try {
+            const parsed = await parseUploadedFile(f);
+            allDirectDrafts.push(...parsed.directDrafts);
+            allChunks.push(...parsed.pipelineChunks);
+            perFileSummary.push({
+              filename: f.name,
+              shape: parsed.shape,
+              records: parsed.recordCount,
+              drafts: parsed.directDrafts.length,
+              chunks: parsed.pipelineChunks.length,
+            });
+            send({
+              phase: 'parse',
+              message: `Parsed ${f.name} → ${parsed.shape} (${parsed.recordCount} records, ${parsed.directDrafts.length} drafts, ${parsed.pipelineChunks.length} chunks)`,
+              done: i + 1,
+              total: files.length,
+            });
+          } catch (e) {
+            perFileSummary.push({
+              filename: f.name,
+              shape: 'unknown',
+              records: 0,
+              drafts: 0,
+              chunks: 0,
+              error: (e as Error).message,
+            });
+            send({
+              phase: 'parse',
+              message: `Skipped ${f.name}: ${(e as Error).message}`,
+              done: i + 1,
+              total: files.length,
+            });
+          }
+        }
+        send({
+          phase: 'parse',
+          message: `Parse done: ${allDirectDrafts.length} direct drafts + ${allChunks.length} chunks across ${files.length} file${files.length === 1 ? '' : 's'}.`,
+          done: files.length,
+          total: files.length,
           data: {
-            filetype: parsed.filetype,
-            shape: parsed.shape,
-            records: parsed.recordCount,
-            directDrafts: parsed.directDrafts.length,
-            pipelineChunks: parsed.pipelineChunks.length,
+            files: perFileSummary,
+            directDrafts: allDirectDrafts.length,
+            chunks: allChunks.length,
           },
         });
 
-        // ----- extract (Pioneer) -----
-        let pipelineDrafts: typeof parsed.directDrafts = [];
-        if (parsed.pipelineChunks.length > 0) {
+        // ----- extract (Pioneer) over union of chunks -----
+        let pipelineDrafts: FactDraft[] = [];
+        if (allChunks.length > 0) {
           send({
             phase: 'extract',
-            message: `Pioneer extracting from ${parsed.pipelineChunks.length} chunks…`,
+            message: `Pioneer extracting from ${allChunks.length} chunks…`,
             done: 0,
-            total: parsed.pipelineChunks.length,
+            total: allChunks.length,
           });
-          pipelineDrafts = await extractFactsFromChunks(parsed.pipelineChunks);
+          try {
+            pipelineDrafts = await extractFactsFromChunks(allChunks, {
+              onProgress: (ev) => {
+                send({
+                  phase: 'extract',
+                  message: `Pioneer batch ${ev.done}/${ev.total}…`,
+                  done: ev.done,
+                  total: ev.total,
+                });
+              },
+            });
+          } catch (e) {
+            // Pioneer down / quota — keep going with whatever direct drafts we have.
+            send({
+              phase: 'extract',
+              message: `Pioneer error (continuing with ${allDirectDrafts.length} direct drafts): ${(e as Error).message}`,
+              done: allChunks.length,
+              total: allChunks.length,
+            });
+          }
           send({
             phase: 'extract',
-            message: `Pioneer extracted ${pipelineDrafts.length} drafts from ${parsed.pipelineChunks.length} chunks.`,
-            done: parsed.pipelineChunks.length,
-            total: parsed.pipelineChunks.length,
+            message: `Pioneer extracted ${pipelineDrafts.length} drafts from ${allChunks.length} chunks.`,
+            done: allChunks.length,
+            total: allChunks.length,
           });
         }
 
-        const allDrafts = [...parsed.directDrafts, ...pipelineDrafts];
+        const allDrafts = [...allDirectDrafts, ...pipelineDrafts];
         if (allDrafts.length === 0) {
           send({
             phase: 'done',
             message:
-              'No facts extractable from this file. Try a JSON / CSV with named records, or a PDF / text file with substantive content.',
+              'No facts extractable from these files. Try JSON / CSV with named records or a PDF / text file with substantive content.',
             data: {
               active: 0,
               redacted: 0,
@@ -163,7 +273,7 @@ export async function POST(req: Request) {
               autoResolved: 0,
               durationMs: Date.now() - t0,
               workspace,
-              filename: file.name,
+              files: perFileSummary,
             },
           });
           controller.close();
@@ -188,7 +298,7 @@ export async function POST(req: Request) {
             userId,
             drafts: allDrafts,
             context,
-            contextLabel: `Upload · ${file.name} · ${allDrafts.length} drafts`,
+            contextLabel: `Upload · ${files.length} file${files.length === 1 ? '' : 's'} · ${allDrafts.length} drafts`,
             signer,
             skipAudit,
             workspace,
@@ -229,8 +339,8 @@ export async function POST(req: Request) {
           },
         });
 
-        // ----- conflicts -----
-        send({ phase: 'conflict', message: 'Running per-workspace conflict pass…' });
+        // ----- conflicts (one pass over the whole workspace) -----
+        send({ phase: 'conflict', message: 'Running cross-source conflict pass…' });
         const conflicts = await resolveUserConflicts(userId, workspace);
         const live = conflicts.groups.filter((g) => g.values.length > 1).length;
         const corroborated = conflicts.groups.filter(
@@ -250,7 +360,7 @@ export async function POST(req: Request) {
             autoResolved: conflicts.resolutions.length,
             durationMs: Date.now() - t0,
             workspace,
-            filename: file.name,
+            files: perFileSummary,
           },
         });
         controller.close();

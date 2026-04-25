@@ -24,7 +24,7 @@ interface ProgressEvent {
   fact?: SignedFact;
 }
 
-interface AggregateStats {
+interface FinalStats {
   active: number;
   redacted: number;
   superseded: number;
@@ -32,7 +32,15 @@ interface AggregateStats {
   corroborated: number;
   autoResolved: number;
   durationMs: number;
-  files: number;
+  workspace?: string;
+  files?: Array<{
+    filename: string;
+    shape: string;
+    records: number;
+    drafts: number;
+    chunks: number;
+    error?: string;
+  }>;
 }
 
 const PHASE_LABEL: Record<Phase, string> = {
@@ -53,21 +61,25 @@ const ACCEPT =
 const ALLOWED_EXTS = ['json', 'ndjson', 'csv', 'txt', 'md', 'pdf'];
 
 interface Props {
-  workspace: 'inazuma' | 'northwind' | 'upload';
+  workspace: string;
 }
 
 /**
  * Drag-and-drop / click-to-pick file uploader.
  *
- * Single-file: drop one file or pick one — runs through /api/ingest-upload
- * and renders the SSE stream live (phase pipeline, progress bar, signed
- * fact rows, final summary).
+ * Bundles every dropped file (single, multi, or whole-folder traversal)
+ * into ONE multipart POST against /api/ingest-upload. The server runs
+ * the pipeline once over the union of drafts — so the conflict pass and
+ * the audit-chain extension happen exactly once, no matter how many
+ * files arrived. Avoids the 306-files-=-306-conflict-passes nightmare.
  *
- * Multi-file / folder: drop many files at once or drag a whole directory.
- * The component traverses the dropped entries via webkitGetAsEntry,
- * filters to known filetypes, and ingests them sequentially through
- * the same SSE channel. The signed-fact tail accumulates across the
- * queue so the audience sees facts compounding from many sources.
+ * The SSE stream renders:
+ *   - phase pipeline (init → parse → pioneer → sign → conflict → done)
+ *   - phase-relevant progress bar (files for parse, chunks for pioneer,
+ *     drafts for sign)
+ *   - tail of signed facts as they land
+ *   - aggregate summary + per-file table at the end
+ *   - "Jump to first conflict" CTA when conflicts surface
  */
 export function FileDropIngest({ workspace }: Props) {
   const router = useRouter();
@@ -75,115 +87,91 @@ export function FileDropIngest({ workspace }: Props) {
   const inputFolderRef = useRef<HTMLInputElement>(null);
   const [running, setRunning] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const [queue, setQueue] = useState<{ idx: number; total: number; name: string } | null>(
-    null,
-  );
+  const [fileCount, setFileCount] = useState(0);
   const [latest, setLatest] = useState<ProgressEvent | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [signedFacts, setSignedFacts] = useState<SignedFact[]>([]);
-  const [agg, setAgg] = useState<AggregateStats | null>(null);
-  const [finishedAll, setFinishedAll] = useState(false);
+  const [final, setFinal] = useState<FinalStats | null>(null);
 
-  /** Run a single file → /api/ingest-upload, fold its result into agg. */
-  const ingestOne = useCallback(
-    async (file: File): Promise<boolean> => {
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('workspace', workspace);
-
-      const res = await fetch('/api/ingest-upload', { method: 'POST', body: fd });
-      if (!res.ok || !res.body) {
-        let msg = `HTTP ${res.status}`;
-        try {
-          const j = await res.json();
-          if (j?.error) msg = j.error;
-        } catch {
-          /* fallthrough */
-        }
-        setError(`${file.name}: ${msg}`);
-        return false;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let lastDoneEvent: ProgressEvent | null = null;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = buf.indexOf('\n\n')) !== -1) {
-          const chunk = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 2);
-          if (!chunk.startsWith('data: ')) continue;
-          try {
-            const event = JSON.parse(chunk.slice(6)) as ProgressEvent;
-            setLatest(event);
-            if (event.fact) {
-              const f = event.fact;
-              setSignedFacts((prev) => {
-                if (prev.some((p) => p.factId === f.factId)) return prev;
-                return [...prev, f].slice(-300);
-              });
-            }
-            if (event.phase === 'done') lastDoneEvent = event;
-            if (event.phase === 'error') {
-              setError(`${file.name}: ${event.message ?? 'unknown'}`);
-              return false;
-            }
-          } catch {
-            /* ignore malformed line */
-          }
-        }
-      }
-
-      // Fold this file's stats into the aggregate. The resolveUserConflicts
-      // pass returns a workspace-wide snapshot, so conflictsLive is the
-      // CURRENT count after this file landed (not additive). Take the max
-      // we've seen so the UI shows the live-now conflict count, not a sum.
-      const data = (lastDoneEvent?.data ?? {}) as Partial<AggregateStats>;
-      setAgg((prev) => ({
-        active: (prev?.active ?? 0) + (data.active ?? 0),
-        redacted: (prev?.redacted ?? 0) + (data.redacted ?? 0),
-        superseded: (prev?.superseded ?? 0) + (data.superseded ?? 0),
-        conflictsLive: data.conflictsLive ?? prev?.conflictsLive ?? 0,
-        corroborated: data.corroborated ?? prev?.corroborated ?? 0,
-        autoResolved: (prev?.autoResolved ?? 0) + (data.autoResolved ?? 0),
-        durationMs: (prev?.durationMs ?? 0) + (data.durationMs ?? 0),
-        files: (prev?.files ?? 0) + 1,
-      }));
-      return true;
-    },
-    [workspace],
-  );
-
-  /** Drive a queue of files through /api/ingest-upload sequentially. */
-  const startQueue = useCallback(
+  /**
+   * Single POST with all files. The route runs the pipeline once over
+   * the union of their drafts, so the audit-chain stays clean and the
+   * conflict pass runs exactly once at the end.
+   */
+  const startUpload = useCallback(
     async (files: File[]) => {
       if (files.length === 0) return;
       setRunning(true);
+      setFileCount(files.length);
       setLatest(null);
       setError(null);
       setSignedFacts([]);
-      setAgg(null);
-      setFinishedAll(false);
+      setFinal(null);
 
+      const fd = new FormData();
+      for (const f of files) fd.append('files', f, f.name);
+      fd.append('workspace', workspace);
+
+      let aborted = false;
       try {
-        for (let i = 0; i < files.length; i++) {
-          setQueue({ idx: i + 1, total: files.length, name: files[i].name });
-          const ok = await ingestOne(files[i]);
-          if (!ok) break;
+        const res = await fetch('/api/ingest-upload', { method: 'POST', body: fd });
+        if (!res.ok || !res.body) {
+          let msg = `HTTP ${res.status}`;
+          try {
+            const j = await res.json();
+            if (j?.error) msg = j.error;
+          } catch {
+            /* fallthrough */
+          }
+          setError(msg);
+          aborted = true;
+          return;
         }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let nl: number;
+          while ((nl = buf.indexOf('\n\n')) !== -1) {
+            const chunk = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 2);
+            if (!chunk.startsWith('data: ')) continue;
+            try {
+              const event = JSON.parse(chunk.slice(6)) as ProgressEvent;
+              setLatest(event);
+              if (event.fact) {
+                const f = event.fact;
+                setSignedFacts((prev) => {
+                  if (prev.some((p) => p.factId === f.factId)) return prev;
+                  return [...prev, f].slice(-500);
+                });
+              }
+              if (event.phase === 'done' && event.data) {
+                setFinal(event.data as unknown as FinalStats);
+              }
+              if (event.phase === 'error') {
+                setError(event.message ?? 'unknown');
+                aborted = true;
+              }
+            } catch {
+              /* ignore malformed line */
+            }
+          }
+        }
+      } catch (e) {
+        setError((e as Error).message);
+        aborted = true;
       } finally {
         setRunning(false);
-        setFinishedAll(true);
-        router.refresh();
+        if (!aborted) router.refresh();
       }
     },
-    [ingestOne, router],
+    [router, workspace],
   );
 
-  /** Triggered by both the file drop and the click-to-pick inputs. */
   const onIncomingFiles = useCallback(
     async (filesIn: File[]) => {
       if (running) return;
@@ -196,9 +184,9 @@ export function FileDropIngest({ workspace }: Props) {
         );
         return;
       }
-      void startQueue(filtered);
+      void startUpload(filtered);
     },
-    [running, startQueue],
+    [running, startUpload],
   );
 
   const phaseIdx = latest ? PHASE_ORDER.indexOf(latest.phase) : -1;
@@ -263,24 +251,16 @@ export function FileDropIngest({ workspace }: Props) {
             <div className="flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-200">
               <Spinner />
               <span>
-                {queue ? (
-                  <>
-                    [{queue.idx}/{queue.total}] Ingesting{' '}
-                    <span className="font-mono text-xs">{queue.name}</span>…
-                  </>
-                ) : (
-                  <>Ingesting…</>
-                )}
+                Ingesting {fileCount} file{fileCount === 1 ? '' : 's'} —{' '}
+                {latest?.phase ? PHASE_LABEL[latest.phase] : 'starting'}
               </span>
             </div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-              {latest?.phase ? PHASE_LABEL[latest.phase] : 'starting'}
-            </p>
           </>
-        ) : finishedAll && agg ? (
+        ) : final ? (
           <>
             <p className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
-              ✓ Ingested {agg.files} file{agg.files === 1 ? '' : 's'}
+              ✓ Ingested {fileCount} file{fileCount === 1 ? '' : 's'} ·{' '}
+              {final.active} active facts
             </p>
             <p className="text-xs text-zinc-500">
               Drop more files (or a folder) to extend the workspace.
@@ -324,20 +304,8 @@ export function FileDropIngest({ workspace }: Props) {
       </label>
 
       {/* Live pipeline panel */}
-      {(running || latest || error || finishedAll) && (
+      {(running || latest || error || final) && (
         <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-          {/* Queue header */}
-          {running && queue && queue.total > 1 && (
-            <div className="mb-3 flex items-center justify-between rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 dark:border-zinc-800 dark:bg-zinc-900/40">
-              <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
-                queue · file {queue.idx} of {queue.total}
-              </span>
-              <span className="font-mono text-[10px] text-zinc-700 dark:text-zinc-300">
-                {queue.name}
-              </span>
-            </div>
-          )}
-
           {/* Phase pipeline */}
           <div className="flex flex-wrap items-center gap-1 text-[10px] font-mono uppercase tracking-wider">
             {PHASE_ORDER.map((p, i) => {
@@ -364,7 +332,7 @@ export function FileDropIngest({ workspace }: Props) {
             })}
           </div>
 
-          {/* Progress bar */}
+          {/* Progress bar (parse: files | extract: chunks | sign: drafts) */}
           {progress !== null && running && (
             <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-900">
               <div
@@ -375,13 +343,14 @@ export function FileDropIngest({ workspace }: Props) {
           )}
           {progress !== null && running && (
             <p className="mt-1 font-mono text-[10px] text-zinc-500">
-              {latest?.done}/{latest?.total} · {progress}%
+              {phaseLabelForUnits(latest?.phase)}: {latest?.done}/{latest?.total} ·{' '}
+              {progress}%
             </p>
           )}
 
           {/* Latest status message */}
           {latest?.message && running && (
-            <p className="mt-2 text-xs text-zinc-700 dark:text-zinc-300">
+            <p className="mt-2 truncate text-xs text-zinc-700 dark:text-zinc-300">
               {latest.message}
             </p>
           )}
@@ -390,7 +359,7 @@ export function FileDropIngest({ workspace }: Props) {
           {signedFacts.length > 0 && (
             <div className="mt-3 max-h-72 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
               <ul className="divide-y divide-zinc-200 font-mono text-[11px] leading-snug dark:divide-zinc-800">
-                {signedFacts.slice(-80).map((f) => (
+                {signedFacts.slice(-100).map((f) => (
                   <li
                     key={f.factId}
                     className="flex items-start gap-2 px-3 py-1.5"
@@ -407,33 +376,67 @@ export function FileDropIngest({ workspace }: Props) {
                 ))}
               </ul>
               <p className="border-t border-zinc-200 bg-white px-3 py-1 font-mono text-[10px] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950">
-                {signedFacts.length} signed event{signedFacts.length === 1 ? '' : 's'}{' '}
-                · tail of {Math.min(signedFacts.length, 80)} shown
+                {signedFacts.length} signed event{signedFacts.length === 1 ? '' : 's'}
+                {' · '}
+                tail of {Math.min(signedFacts.length, 100)} shown
               </p>
             </div>
           )}
 
-          {/* Aggregate summary (visible during + after) */}
-          {agg && (
+          {/* Final summary */}
+          {final && (
             <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-700/50 dark:bg-emerald-950/30">
-              <Stat label="active" value={agg.active} />
-              <Stat label="redacted" value={agg.redacted} />
-              <Stat label="conflicts" value={agg.conflictsLive} />
-              <Stat label="corroborated" value={agg.corroborated} />
-              <Stat label="auto-resolved" value={agg.autoResolved} />
+              <Stat label="active" value={final.active} />
+              <Stat label="redacted" value={final.redacted} />
+              <Stat label="conflicts" value={final.conflictsLive} />
+              <Stat label="corroborated" value={final.corroborated} />
+              <Stat label="auto-resolved" value={final.autoResolved} />
               <Stat
                 label="duration"
-                value={`${(agg.durationMs / 1000).toFixed(1)}s`}
+                value={`${(final.durationMs / 1000).toFixed(1)}s`}
               />
             </div>
           )}
 
+          {/* Per-file breakdown when many files were dropped */}
+          {final && final.files && final.files.length > 1 && (
+            <details className="mt-2">
+              <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+                per-file breakdown · {final.files.length} files
+              </summary>
+              <div className="mt-2 max-h-48 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-900/40">
+                <table className="w-full font-mono text-[10px]">
+                  <thead className="text-zinc-500">
+                    <tr className="text-left">
+                      <th className="pb-1">file</th>
+                      <th className="pb-1">shape</th>
+                      <th className="pb-1 text-right">rec</th>
+                      <th className="pb-1 text-right">drafts</th>
+                      <th className="pb-1 text-right">chunks</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {final.files.map((f) => (
+                      <tr key={f.filename} className="text-zinc-700 dark:text-zinc-300">
+                        <td className="truncate pr-2">{f.filename}</td>
+                        <td className="pr-2 text-zinc-500">{f.shape}</td>
+                        <td className="pr-2 text-right tabular-nums">{f.records}</td>
+                        <td className="pr-2 text-right tabular-nums">{f.drafts}</td>
+                        <td className="text-right tabular-nums">{f.chunks}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+
           {/* Conflict CTA */}
-          {finishedAll && agg && agg.conflictsLive > 0 && (
+          {final && final.conflictsLive > 0 && (
             <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 dark:border-amber-700/50 dark:bg-amber-950/30">
               <p className="text-xs font-medium text-amber-900 dark:text-amber-200">
-                {agg.conflictsLive} unresolved conflict
-                {agg.conflictsLive === 1 ? '' : 's'} need your decision —
+                {final.conflictsLive} unresolved conflict
+                {final.conflictsLive === 1 ? '' : 's'} need your decision —
                 scroll down to resolve.
               </p>
               <button
@@ -462,15 +465,25 @@ export function FileDropIngest({ workspace }: Props) {
   );
 }
 
+function phaseLabelForUnits(phase?: Phase): string {
+  switch (phase) {
+    case 'parse':
+      return 'files';
+    case 'extract':
+      return 'chunks';
+    case 'sign':
+      return 'drafts';
+    default:
+      return '';
+  }
+}
+
 /* ---------------------------------------------------------------- *
  *  Drop traversal — collect File[] from a DataTransfer that may
  *  carry plain files OR a folder (via webkitGetAsEntry).
  * ---------------------------------------------------------------- */
 
 async function collectFromDrop(dt: DataTransfer): Promise<File[]> {
-  // Prefer items[] when available — it exposes folder entries via
-  // webkitGetAsEntry. Fall back to dt.files for older browsers / drops
-  // that aren't directory-shaped.
   const out: File[] = [];
   const items = dt.items ? Array.from(dt.items) : [];
   if (items.length > 0 && typeof items[0].webkitGetAsEntry === 'function') {
@@ -481,7 +494,6 @@ async function collectFromDrop(dt: DataTransfer): Promise<File[]> {
     for (const e of entries) await walkEntry(e, out);
     if (out.length > 0) return out;
   }
-  // Fallback: plain file list.
   if (dt.files && dt.files.length > 0) {
     return Array.from(dt.files);
   }
@@ -494,7 +506,6 @@ async function walkEntry(entry: FileSystemEntry, out: File[]): Promise<void> {
     await new Promise<void>((resolve) => {
       fileEntry.file(
         (file) => {
-          // Skip hidden / metadata files macOS inserts in zips and folders.
           if (!file.name.startsWith('.') && !file.name.startsWith('._')) {
             out.push(file);
           }
@@ -508,7 +519,6 @@ async function walkEntry(entry: FileSystemEntry, out: File[]): Promise<void> {
   if (entry.isDirectory) {
     const dirEntry = entry as FileSystemDirectoryEntry;
     const reader = dirEntry.createReader();
-    // readEntries returns batches of up to ~100 entries; loop until empty.
     while (true) {
       const batch: FileSystemEntry[] = await new Promise((resolve) => {
         reader.readEntries(

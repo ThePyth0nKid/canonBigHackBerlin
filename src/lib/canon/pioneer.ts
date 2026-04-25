@@ -126,7 +126,12 @@ export interface Chunk {
  */
 export async function extractFactsFromChunks(
   chunks: Chunk[],
-  opts?: { threshold?: number },
+  opts?: {
+    threshold?: number;
+    /** Called after every Pioneer batch with progress. UI uses this to
+     *  drive the "extract" phase progress bar during big drops. */
+    onProgress?: (ev: { done: number; total: number }) => void;
+  },
 ): Promise<FactDraft[]> {
   const filtered = chunks
     .flatMap(splitChunkPerSentence)
@@ -134,6 +139,7 @@ export async function extractFactsFromChunks(
   if (filtered.length === 0) return [];
 
   const drafts: FactDraft[] = [];
+  opts?.onProgress?.({ done: 0, total: filtered.length });
   for (let i = 0; i < filtered.length; i += MAX_BATCH) {
     const batch = filtered.slice(i, i + MAX_BATCH);
     const resp = await callPioneer({
@@ -149,6 +155,10 @@ export async function extractFactsFromChunks(
       const raw = blockToDraft(blocks[idx], chunk);
       const cleaned = postProcessDraft(raw, chunk);
       for (const d of cleaned) drafts.push(d);
+    });
+    opts?.onProgress?.({
+      done: Math.min(i + MAX_BATCH, filtered.length),
+      total: filtered.length,
     });
   }
   return drafts;
