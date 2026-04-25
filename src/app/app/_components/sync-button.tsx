@@ -36,7 +36,8 @@ export function SyncButton({ skipAuditDefault = true }: { skipAuditDefault?: boo
 
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 6000);
+    // 12s gives Nelson enough narration time on stage; click-x dismisses sooner.
+    const t = setTimeout(() => setToast(null), 12000);
     return () => clearTimeout(t);
   }, [toast]);
 

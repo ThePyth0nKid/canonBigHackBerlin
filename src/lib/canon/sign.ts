@@ -112,9 +112,28 @@ export class CanonSigner {
     };
 
     return new Promise<SignResponse>((resolve, reject) => {
-      this.pending.set(req.factId, { resolve, reject });
+      // 5s per-sign timeout — protects against a hung signer subprocess
+      // that would otherwise leave the Sync button spinning forever.
+      const timer = setTimeout(() => {
+        if (this.pending.has(req.factId)) {
+          this.pending.delete(req.factId);
+          reject(new SignerError('signer timeout (5s)'));
+        }
+      }, 5000);
+
+      this.pending.set(req.factId, {
+        resolve: (r) => {
+          clearTimeout(timer);
+          resolve(r);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
       this.child!.stdin.write(JSON.stringify(payload) + '\n', (err) => {
         if (err) {
+          clearTimeout(timer);
           this.pending.delete(req.factId);
           reject(new SignerError('failed to write to signer stdin', err.message));
         }

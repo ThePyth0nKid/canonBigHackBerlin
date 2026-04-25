@@ -61,10 +61,11 @@ async function runSync(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const skipAudit = url.searchParams.get('audit') === 'off';
 
-  // Idempotency: clear the user's existing chain so each Sync is a fresh take
-  // on the source body. The audit chain stays intra-run honest; cross-run
-  // history is out of scope for the hackathon demo.
-  await prisma.factEvent.deleteMany({ where: { userId } });
+  // Capture the cutoff BEFORE any new signing happens. We never delete first —
+  // if mid-sync something fails, the old chain is still intact for /app to
+  // render. Old facts get cleared only AFTER at least one source successfully
+  // produces fresh signed events (signedAt > t0).
+  const syncStartedAt = new Date(t0);
 
   const sources: SyncSummary['sources'] = [];
   const signer = new CanonSigner();
@@ -117,6 +118,18 @@ async function runSync(req: Request): Promise<Response> {
     }));
   } finally {
     await signer.close();
+  }
+
+  // Now that fresh facts are persisted, drop the pre-sync chain — but ONLY if
+  // we actually have new facts to replace it. Prevents a half-failed sync from
+  // wiping the demo state on stage.
+  const freshCount = await prisma.factEvent.count({
+    where: { userId, signedAt: { gte: syncStartedAt } },
+  });
+  if (freshCount > 0) {
+    await prisma.factEvent.deleteMany({
+      where: { userId, signedAt: { lt: syncStartedAt } },
+    });
   }
 
   const conflictPass = await resolveUserConflicts(userId);

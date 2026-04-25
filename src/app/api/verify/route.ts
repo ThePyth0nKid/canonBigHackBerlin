@@ -42,8 +42,11 @@ export async function POST(req: Request) {
     const result = await runVerify(fact.coseSign1Hex, fact.signerPubkey);
     return NextResponse.json({ ...result, latencyMs: Date.now() - t0 });
   } catch (e) {
+    // Sanitize: never leak filesystem paths or internal stack info to the
+    // client. Full detail still goes to server logs for debugging.
+    console.error('[/api/verify] error', e);
     return NextResponse.json(
-      { verified: false, error: (e as Error).message, latencyMs: Date.now() - t0 },
+      { verified: false, error: 'verify unavailable', latencyMs: Date.now() - t0 },
       { status: 500 },
     );
   }

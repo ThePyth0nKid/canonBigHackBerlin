@@ -123,17 +123,24 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
                       onClick={() => {
                         setPicked(head.id);
                         start(async () => {
-                          await resolveConflict({
-                            entity,
-                            metricKey,
-                            winnerFactId: head.id,
-                          });
-                          setOpen(false);
+                          try {
+                            await resolveConflict({
+                              entity,
+                              metricKey,
+                              winnerFactId: head.id,
+                            });
+                            setOpen(false);
+                          } catch (e) {
+                            // Surface the failure inline so the button never
+                            // gets stuck on "signing…" mid-pitch.
+                            setPicked(null);
+                            console.error('[conflict-resolve]', e);
+                          }
                         });
                       }}
                       className="mt-4 inline-flex h-9 items-center justify-center rounded-full bg-zinc-950 px-4 text-xs font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
                     >
-                      {pending && picked === head.id ? 'signing…' : 'pick as truth'}
+                      {pending && picked === head.id ? 'signing…' : 'Sign as canonical'}
                     </button>
                   </div>
                 );

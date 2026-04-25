@@ -123,9 +123,12 @@ export async function auditBatch(
       try {
         verdicts[idx] = await auditFact({ draft: drafts[idx], context, contextLabel });
       } catch (e) {
+        // FAIL-CLOSED: an audit error must NOT silently confirm a fact.
+        // Mark the verdict as unavailable so the pipeline tags the FactEvent
+        // with notes='audit:audit_unavailable' and the UI can show the badge.
         verdicts[idx] = {
-          confirmed: true,
-          contradiction: undefined,
+          confirmed: false,
+          contradiction: 'audit_unavailable',
           confidence: 0,
         };
       }
@@ -156,8 +159,8 @@ function parseVerdict(raw: string): AuditVerdict {
           : 0.5,
     };
   } catch {
-    // If Gemini returned malformed JSON, default to confirmed/low-confidence
-    // so a flaky audit can't accidentally redact good facts.
-    return { confirmed: true, confidence: 0 };
+    // FAIL-CLOSED on malformed Gemini JSON — surface as audit_unavailable
+    // rather than silent confirmed=true.
+    return { confirmed: false, contradiction: 'audit_unavailable', confidence: 0 };
   }
 }

@@ -395,6 +395,23 @@ function postProcessDraft(draft: FactDraft | null, chunk: Chunk): FactDraft[] {
     metricUnit = metricUnit ?? '/yr';
   }
 
+  // Drop "seats=180", "seats=200" — those are euros-per-seat, not headcount.
+  // Real-world customer seat counts are 1-1000; anything bigger is a price.
+  if (metricKey === 'seats') {
+    const n = Number((metricValue || '').replace(/[^\d]/g, ''));
+    if (!Number.isFinite(n) || n < 1 || n > 1000) {
+      return additions;
+    }
+  }
+
+  // billing_cycle MUST be a cadence word, not a date or number. Pioneer
+  // sometimes drops the implementation deadline ("2026-05-15") into this slot.
+  if (metricKey === 'billing_cycle') {
+    if (!/^(annual|monthly|quarterly|yearly|weekly)/i.test(metricValue)) {
+      return additions;
+    }
+  }
+
   // === Whitelist gate ====================================================== //
   if (!metricKey || !ALLOWED_METRIC_KEYS.has(metricKey)) {
     return additions;
