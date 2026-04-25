@@ -38,20 +38,27 @@ const COMPANY_DISPLAY = 'Inazuma.co';
 
 export interface QontextLimits {
   maxClients?: number;
+  maxVendors?: number;
   maxCustomers?: number;
   maxEmployees?: number;
   maxEmails?: number;
   maxConversations?: number;
   maxPosts?: number;
+  maxItTickets?: number;
+  maxPolicies?: number;
 }
 
+/** Default sample sizes — tuned to land ~1500-2000 facts in the Inazuma workspace. */
 const DEFAULT_LIMITS: Required<QontextLimits> = {
-  maxClients: 40,
-  maxCustomers: 12,
-  maxEmployees: 15,
-  maxEmails: 30,
-  maxConversations: 15,
-  maxPosts: 10,
+  maxClients: 400,
+  maxVendors: 400,
+  maxCustomers: 90,
+  maxEmployees: 60,
+  maxEmails: 60,
+  maxConversations: 30,
+  maxPosts: 30,
+  maxItTickets: 40,
+  maxPolicies: 8,
 };
 
 /**
@@ -83,11 +90,14 @@ export interface QontextIngestResult {
   pipelineChunks: Chunk[];
   counts: {
     clients: number;
+    vendors: number;
     customers: number;
     employees: number;
     emails: number;
     conversations: number;
     posts: number;
+    itTickets: number;
+    policies: number;
   };
 }
 
@@ -104,11 +114,14 @@ export async function loadQontextSample(
   const pipelineChunks: Chunk[] = [];
   const counts = {
     clients: 0,
+    vendors: 0,
     customers: 0,
     employees: 0,
     emails: 0,
     conversations: 0,
     posts: 0,
+    itTickets: 0,
+    policies: 0,
   };
 
   // 1. Clients — B2B engagements (richest entity records).
@@ -155,12 +168,13 @@ export async function loadQontextSample(
       ...dualRoleVendors,
       ...pickSample(
         vendors.filter((v) => !dualRoleVendors.includes(v)),
-        Math.max(0, lim.maxClients - dualRoleVendors.length),
+        Math.max(0, lim.maxVendors - dualRoleVendors.length),
       ),
-    ].slice(0, lim.maxClients);
+    ].slice(0, lim.maxVendors);
     for (const v of sampled) {
       directDrafts.push(...vendorToDrafts(v));
     }
+    counts.vendors = sampled.length;
   } catch (e) {
     console.warn('[qontext] vendors.json skipped:', (e as Error).message);
   }
@@ -241,6 +255,29 @@ export async function loadQontextSample(
     console.warn('[qontext] posts.json skipped:', (e as Error).message);
   }
 
+  // 7. IT Service Management tickets — direct ingest (status+priority+assignee).
+  try {
+    const tickets = await readJson<ItTicketRecord[]>(
+      'IT_Service_Management/it_tickets.json',
+    );
+    const sampled = pickSample(tickets, lim.maxItTickets);
+    for (const t of sampled) {
+      directDrafts.push(...itTicketToDrafts(t));
+    }
+    counts.itTickets = sampled.length;
+  } catch (e) {
+    console.warn('[qontext] it_tickets.json skipped:', (e as Error).message);
+  }
+
+  // 8. Policy PDFs — feed each policy through Pioneer like the Q1 board deck.
+  try {
+    const policyChunks = await loadPolicyPdfChunks(lim.maxPolicies);
+    pipelineChunks.push(...policyChunks);
+    counts.policies = new Set(policyChunks.map((c) => c.sourceRef.split('#')[0])).size;
+  } catch (e) {
+    console.warn('[qontext] policies skipped:', (e as Error).message);
+  }
+
   return { directDrafts, pipelineChunks, counts };
 }
 
@@ -313,6 +350,16 @@ interface PostRecord {
   Post: string;
   emp_id?: string;
   author?: string;
+}
+
+interface ItTicketRecord {
+  id: string;
+  priority?: string;
+  raised_by_emp_id?: string;
+  assigned_date?: string;
+  emp_id?: string;
+  Issue?: string;
+  Resolution?: string;
 }
 
 /* -------------------------------------------------------------------------- *
@@ -468,17 +515,100 @@ function employeeToDrafts(e: EmployeeRecord): FactDraft[] {
 }
 
 function postToDrafts(p: PostRecord): FactDraft[] {
+  // Each post is its own fact, not a competing claim of one global
+  // 'social_post' metric. Emit as a loose fact (no metric key) so the
+  // conflict detector doesn't group them as a fake N-way conflict.
   const ref = `qontext:post:${p.emp_id ?? slugify(p.Title)}`;
   return [
     {
       entity: COMPANY_SLUG,
-      claim: `${COMPANY_DISPLAY} social-platform post: "${p.Title}".`,
-      metric: { key: 'social_post', value: p.Title },
+      claim: `Social post: "${p.Title}" — ${(p.Post ?? '').slice(0, 200).replace(/\s+/g, ' ').trim()}`,
       sourceRef: ref,
       sourceExcerpt: (p.Post ?? '').slice(0, 240),
       observedAt: new Date().toISOString(),
     },
   ];
+}
+
+function itTicketToDrafts(t: ItTicketRecord): FactDraft[] {
+  // Each ticket emits two facts: one about the raiser (emp_id of the
+  // user reporting the issue), one about the assignee (the IT person
+  // who resolved it). This creates natural cross-source links — the
+  // same emp_id may appear in employees.json + emails + conversations
+  // + this ticket, layering provenance across systems.
+  const ref = `qontext:it_ticket:${t.id}`;
+  const observed = parseDateOrNow(t.assigned_date);
+  const issueShort = (t.Issue ?? '').replace(/\s+/g, ' ').slice(0, 200);
+  const resoShort = (t.Resolution ?? '').replace(/\s+/g, ' ').slice(0, 200);
+  const drafts: FactDraft[] = [];
+  if (t.raised_by_emp_id) {
+    drafts.push({
+      entity: t.raised_by_emp_id,
+      claim: `Raised IT ticket #${t.id} (${t.priority ?? 'unknown'} priority): ${issueShort}`,
+      metric: { key: 'open_tickets_raised', value: t.id },
+      sourceRef: ref,
+      sourceExcerpt: issueShort,
+      observedAt: observed,
+    });
+  }
+  if (t.emp_id) {
+    drafts.push({
+      entity: t.emp_id,
+      claim: `Assigned IT ticket #${t.id}: ${resoShort || issueShort}`,
+      metric: { key: 'assigned_tickets', value: t.id },
+      sourceRef: ref,
+      sourceExcerpt: resoShort || issueShort,
+      observedAt: observed,
+    });
+  }
+  return drafts;
+}
+
+/**
+ * Read up to `max` policy PDFs from Policy_Documents/, extract per-page text
+ * via the same pdf-parse-v2 pipeline that ingests Q1's board deck, and emit
+ * Chunks. Sampled deterministically for demo reproducibility.
+ */
+async function loadPolicyPdfChunks(max: number): Promise<Chunk[]> {
+  if (max <= 0) return [];
+  const policyDir = path.join(DATA_ROOT, 'Policy_Documents');
+  const { readdir } = await import('node:fs/promises');
+  let entries: string[] = [];
+  try {
+    entries = await readdir(policyDir);
+  } catch {
+    return [];
+  }
+  const pdfs = entries
+    .filter((f) => f.toLowerCase().endsWith('.pdf') && !f.startsWith('._'))
+    .sort();
+  const sampled = pickSample(pdfs, max);
+
+  const { PDFParse } = await import('pdf-parse');
+  const chunks: Chunk[] = [];
+  for (const filename of sampled) {
+    try {
+      const decoded = decodeURIComponent(filename);
+      const buf = await readFile(path.join(policyDir, filename));
+      const parser = new PDFParse({ data: new Uint8Array(buf) });
+      const result = await parser.getText();
+      const pages = (result.pages ?? []) as Array<{ text?: string }>;
+      pages.forEach((p, idx) => {
+        const text = (p.text ?? '').replace(/\s+/g, ' ').trim();
+        if (text.length < 60) return;
+        chunks.push({
+          text,
+          sourceRef: `qontext:policy:${slugify(decoded.replace(/\.pdf$/i, ''))}#p${idx + 1}`,
+          observedAt: new Date().toISOString(),
+          sourceExcerpt: text.slice(0, 240),
+          defaultEntity: COMPANY_SLUG,
+        });
+      });
+    } catch (e) {
+      console.warn(`[qontext] policy ${filename} skipped:`, (e as Error).message);
+    }
+  }
+  return chunks;
 }
 
 /* -------------------------------------------------------------------------- *
