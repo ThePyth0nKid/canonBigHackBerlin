@@ -4,11 +4,12 @@
  * over the Model Context Protocol via stdio.
  *
  * Tools:
- *   canon_lookup   — all active facts for an entity (slug)
- *   canon_search   — free-text substring match across all active facts
- *   canon_cite     — full audit-chain proof for a single factId
- *   canon_diff     — facts created/changed since an ISO date  (stub-light: time-window)
- *   canon_write    — propose a new fact (NOT IMPLEMENTED in v0.1)
+ *   canon_lookup           — all active facts for an entity (slug)
+ *   canon_search           — free-text substring match across all active facts
+ *   canon_cite             — full audit-chain proof for a single factId
+ *   canon_diff             — facts created/changed since an ISO date  (stub-light: time-window)
+ *   canon_external_lookup  — UNSIGNED public-web context via Tavily (signed/unsigned split)
+ *   canon_write            — propose a new fact (NOT IMPLEMENTED in v0.1)
  *
  * Demo workspace = the most-recently-created User (matches the Northwind seed).
  *
@@ -35,6 +36,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { PrismaClient } from '../src/generated/prisma/client.js';
+import { searchExternal } from '../src/lib/canon/tavily.js';
 
 // ---------------------------------------------------------------------------
 // Prisma client (we instantiate locally instead of importing the Next-aware
@@ -284,6 +286,58 @@ async function canonWrite(_entity: string, _claim: string) {
   );
 }
 
+async function canonExternalLookup(
+  query: string,
+  opts: { topic?: 'general' | 'news' | 'finance'; maxResults?: number },
+) {
+  const trimmed = (query ?? '').trim();
+  if (!trimmed) return errorBlock('query is required');
+
+  let result;
+  try {
+    result = await searchExternal(trimmed, {
+      topic: opts.topic,
+      maxResults: opts.maxResults ?? 5,
+    });
+  } catch (e) {
+    return errorBlock(`Tavily error: ${(e as Error).message}`);
+  }
+
+  if (result.items.length === 0) {
+    return textBlock(
+      `# External web context for "${trimmed}" — 0 results\n\nTavily returned no matches. Try a broader query or check Canon's signed facts via canon_search/canon_lookup.`,
+    );
+  }
+
+  const lines: string[] = [];
+  lines.push(
+    `# External web context for "${trimmed}" — ${result.items.length} result(s)`,
+  );
+  lines.push('');
+  lines.push(
+    `**⚠ unsigned · best-effort web context (not a Canon FactEvent).** ` +
+      `For cryptographically provable facts about an entity, call canon_lookup({entity}) ` +
+      `or canon_cite({factId}).`,
+  );
+  lines.push('');
+  if (result.synthesis) {
+    lines.push(`**Tavily synthesis:** ${result.synthesis}`);
+    lines.push('');
+  }
+  for (const it of result.items) {
+    lines.push(
+      `- [${it.title}](${it.url})\n` +
+        `  · ${it.excerpt}\n` +
+        `  · source: tavily-web · unsigned: true${it.publishedAt ? ` · published: ${it.publishedAt}` : ''}${typeof it.relevance === 'number' ? ` · relevance: ${it.relevance.toFixed(2)}` : ''}`,
+    );
+  }
+  lines.push('');
+  lines.push(
+    `(${result.latencyMs}ms · fetched ${result.fetchedAt})`,
+  );
+  return textBlock(lines.join('\n'));
+}
+
 // ---------------------------------------------------------------------------
 // Server wiring
 // ---------------------------------------------------------------------------
@@ -372,6 +426,35 @@ async function main() {
       },
     },
     async ({ entity, since }) => canonDiff(entity, since),
+  );
+
+  server.registerTool(
+    'canon_external_lookup',
+    {
+      title: 'Canon — external (web) context, UNSIGNED',
+      description:
+        '[CALL THIS when the user asks for PUBLIC web context about an entity, ' +
+        'a market signal, news, competitor mentions, or anything that lives outside the workspace.] ' +
+        'Returns Tavily-sourced web results with an EXPLICIT unsigned:true marker on every item. ' +
+        "These results are best-effort context, NOT cryptographically provable Canon facts. " +
+        'Pair with canon_lookup / canon_search to surface BOTH internal signed truth AND ' +
+        'external context side-by-side — agents (and humans reading the audit log) see exactly ' +
+        'which facts are signed and which are best-effort web data. Examples: ' +
+        '"What is the public web saying about ACME?" "Recent news about TechCo churn?".',
+      inputSchema: {
+        query: z.string().describe('Free-text query — entity name, keyword, or phrase.'),
+        topic: z
+          .enum(['general', 'news', 'finance'])
+          .optional()
+          .describe('Optional topic filter. "news" for time-sensitive, "finance" for market signal.'),
+        maxResults: z
+          .number()
+          .optional()
+          .describe('Cap on returned items (1–20, default 5).'),
+      },
+    },
+    async ({ query, topic, maxResults }) =>
+      canonExternalLookup(query, { topic, maxResults }),
   );
 
   server.registerTool(
