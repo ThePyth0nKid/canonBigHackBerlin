@@ -92,6 +92,12 @@ export function FileDropIngest({ workspace }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [signedFacts, setSignedFacts] = useState<SignedFact[]>([]);
   const [final, setFinal] = useState<FinalStats | null>(null);
+  const phaseStartRef = useRef<{ phase: Phase | null; t: number; doneAt: number }>({
+    phase: null,
+    t: 0,
+    doneAt: 0,
+  });
+  const [eta, setEta] = useState<string | null>(null);
 
   /**
    * Single POST with all files. The route runs the pipeline once over
@@ -107,6 +113,8 @@ export function FileDropIngest({ workspace }: Props) {
       setError(null);
       setSignedFacts([]);
       setFinal(null);
+      setEta(null);
+      phaseStartRef.current = { phase: null, t: 0, doneAt: 0 };
 
       const fd = new FormData();
       for (const f of files) fd.append('files', f, f.name);
@@ -142,6 +150,28 @@ export function FileDropIngest({ workspace }: Props) {
             try {
               const event = JSON.parse(chunk.slice(6)) as ProgressEvent;
               setLatest(event);
+              // Compute a phase-local ETA from the rate of done/total
+              // progress within the current phase. Resets when phase
+              // changes so each phase shows its own ETA, not the run total.
+              const ref = phaseStartRef.current;
+              if (event.phase !== ref.phase) {
+                ref.phase = event.phase;
+                ref.t = Date.now();
+                ref.doneAt = event.done ?? 0;
+              } else if (
+                typeof event.done === 'number' &&
+                typeof event.total === 'number' &&
+                event.total > 0 &&
+                event.done > ref.doneAt
+              ) {
+                const elapsed = Date.now() - ref.t;
+                const ratio = (event.done - ref.doneAt) / event.total;
+                if (ratio > 0.01 && elapsed > 500) {
+                  const remainingRatio = (event.total - event.done) / event.total;
+                  const etaMs = (elapsed / ratio) * remainingRatio;
+                  setEta(formatEta(etaMs));
+                }
+              }
               if (event.fact) {
                 const f = event.fact;
                 setSignedFacts((prev) => {
@@ -345,6 +375,9 @@ export function FileDropIngest({ workspace }: Props) {
             <p className="mt-1 font-mono text-[10px] text-zinc-500">
               {phaseLabelForUnits(latest?.phase)}: {latest?.done}/{latest?.total} ·{' '}
               {progress}%
+              {eta && (
+                <span className="ml-2 text-zinc-400">~{eta} remaining</span>
+              )}
             </p>
           )}
 
@@ -463,6 +496,15 @@ export function FileDropIngest({ workspace }: Props) {
       )}
     </div>
   );
+}
+
+function formatEta(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r === 0 ? `${m}m` : `${m}m${r.toString().padStart(2, '0')}s`;
 }
 
 function phaseLabelForUnits(phase?: Phase): string {

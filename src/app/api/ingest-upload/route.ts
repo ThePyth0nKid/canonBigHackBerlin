@@ -293,6 +293,13 @@ export async function POST(req: Request) {
         const signer = new CanonSigner();
         signer.start();
         let result;
+        // Throttle the SSE flood when signing thousands of drafts: emit every
+        // single one for the first 30 (so the row tail looks alive instantly)
+        // then throttle to every Nth so 5000-draft uploads don't drown the
+        // browser in JSON parses. We always emit the very last event so the
+        // progress bar lands cleanly at 100%.
+        const total = allDrafts.length;
+        const stride = total <= 100 ? 1 : total <= 500 ? 3 : total <= 2000 ? 8 : 20;
         try {
           result = await runPipeline({
             userId,
@@ -304,6 +311,10 @@ export async function POST(req: Request) {
             workspace,
             onProgress: (ev) => {
               if (ev.phase !== 'sign') return;
+              const isFirstBurst = ev.done <= 30;
+              const isStride = ev.done % stride === 0;
+              const isLast = ev.done >= ev.total;
+              if (!isFirstBurst && !isStride && !isLast) return;
               const f = ev.fact;
               send({
                 phase: 'sign',
