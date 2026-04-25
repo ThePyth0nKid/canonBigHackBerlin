@@ -1,19 +1,21 @@
 /**
  * POST /api/verify — independently verify a fact's COSE_Sign1 envelope.
  *
- * Spawns the canon-verify CLI (separate binary from canon-signer — proves
- * the signature can be checked by something OTHER than what produced it).
- * Returns `{ verified, eventHash, kid, latencyMs }` or an error.
+ * Implementation: pure-TS verifier (`verifyCanonEnvelope`) using
+ * @noble/ed25519 + a hand-rolled canonical CBOR encoder for
+ * Sig_structure_1. Sigstore-style cross-language verification: the
+ * signer is Rust (canon-signer sidecar), the verifier here has never
+ * seen its source. Mathematics agree → trust is reproducible.
+ *
+ * Returns `{ verified, event_hash, kid, latencyMs }` on success or
+ * `{ verified: false, error, latencyMs }` on failure. Output shape is
+ * identical to the legacy Rust canon-verify CLI for client compatibility.
  */
 
 import { NextResponse } from 'next/server';
-import { spawn } from 'node:child_process';
 import { auth } from '@/auth';
 import { prisma } from '@/lib/prisma';
-
-const VERIFY_BINARY =
-  process.env.CANON_VERIFY_PATH ??
-  '/Users/nelsonmehlis/Desktop/empheral/reference/validator/target/release/canon-verify';
+import { verifyCanonEnvelope } from '@/lib/canon/verify-js';
 
 export async function POST(req: Request) {
   const session = await auth();
@@ -39,50 +41,13 @@ export async function POST(req: Request) {
 
   const t0 = Date.now();
   try {
-    const result = await runVerify(fact.coseSign1Hex, fact.signerPubkey);
+    const result = await verifyCanonEnvelope(fact.coseSign1Hex, fact.signerPubkey);
     return NextResponse.json({ ...result, latencyMs: Date.now() - t0 });
   } catch (e) {
-    // Sanitize: never leak filesystem paths or internal stack info to the
-    // client. Full detail still goes to server logs for debugging.
-    console.error('[/api/verify] error', e);
+    console.error('[/api/verify] unexpected error', e);
     return NextResponse.json(
       { verified: false, error: 'verify unavailable', latencyMs: Date.now() - t0 },
       { status: 500 },
     );
   }
-}
-
-interface VerifyResult {
-  verified: boolean;
-  eventHash?: string;
-  kid?: string;
-  error?: string;
-}
-
-function runVerify(envelopeHex: string, pubkey: string): Promise<VerifyResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(VERIFY_BINARY, [
-      '--envelope-hex',
-      envelopeHex,
-      '--pubkey',
-      pubkey,
-    ]);
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (c) => (stdout += c.toString()));
-    child.stderr.on('data', (c) => (stderr += c.toString()));
-    child.on('error', reject);
-    child.on('exit', (code) => {
-      if (code === 2) return reject(new Error(stderr || 'canon-verify usage error'));
-      try {
-        const data = JSON.parse(stdout.trim()) as VerifyResult;
-        resolve(data);
-      } catch {
-        resolve({
-          verified: false,
-          error: stderr || 'canon-verify produced invalid JSON',
-        });
-      }
-    });
-  });
 }
