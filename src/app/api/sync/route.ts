@@ -166,6 +166,7 @@ async function runSource(
       superseded: result.superseded,
     };
   } catch (e) {
+    console.error(`[/api/sync] ${label} adapter failed`, e);
     return {
       label,
       drafts: 0,
