@@ -64,7 +64,16 @@ export async function ingestGmail(
   }
 
   const ids = await listMessageIds(accessToken, query, max);
-  const messages = await Promise.all(ids.map((id) => fetchMessage(accessToken, id)));
+  // Serialise the per-message fetches with a small delay. Parallel
+  // Promise.all over 5+ ids was enough to trip Gmail's per-user QPS
+  // quota (HTTP 429) on prod. The whole sync is bounded to ~25 mails
+  // anyway, so 100ms*25 = 2.5s extra is invisible to the user.
+  const messages: GmailMessage[] = [];
+  for (const id of ids) {
+    const m = await fetchMessageWithRetry(accessToken, id);
+    messages.push(m);
+    await sleep(100);
+  }
   const chunks = messages.flatMap(messageToChunks);
   const drafts = await extractFactsFromChunks(chunks);
 
@@ -90,6 +99,28 @@ async function fetchMessage(token: string, id: string): Promise<GmailMessage> {
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) throw new Error(`Gmail get HTTP ${res.status}`);
   return (await res.json()) as GmailMessage;
+}
+
+/** fetchMessage + one retry on 429 (Retry-After honoured if Gmail sets it). */
+async function fetchMessageWithRetry(
+  token: string,
+  id: string,
+): Promise<GmailMessage> {
+  try {
+    return await fetchMessage(token, id);
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (!msg.includes('429')) throw e;
+    // Backoff for the standard Gmail rate-limit window. 1.2s is enough to
+    // clear the per-second user quota; if the SECOND attempt also 429s the
+    // caller's outer try/catch surfaces it as a soft sync failure.
+    await sleep(1200);
+    return fetchMessage(token, id);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function messageToChunks(m: GmailMessage): Chunk[] {
