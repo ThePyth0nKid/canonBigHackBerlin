@@ -131,6 +131,12 @@ export async function coSignResolution(args: {
   }
 
   // Atomic: write the cosign event + flip pending→resolution + supersede losers.
+  // The pending row update uses updateMany with a status filter so two
+  // concurrent cosign attempts can't both succeed — the second one's
+  // updateMany returns count=0 and we treat that as a race-loss. Without
+  // that filter, both transactions would read pending=true at the precheck,
+  // both would write cosign events, leaving a duplicate f_cos_* on the chain.
+  //
   // Loser updateMany filters by id + workspace + status — no userId filter,
   // because the loser facts may have been ingested under any userId in
   // this workspace; the id list is authoritative (parsed from the signed
@@ -158,8 +164,8 @@ export async function coSignResolution(args: {
         notes: `cosign-of:${original.eventHash}:by:${cosignerEmail || cosignerUserId}`,
       },
     }),
-    prisma.factEvent.update({
-      where: { id: original.id },
+    prisma.factEvent.updateMany({
+      where: { id: original.id, status: 'resolution-pending' },
       data: {
         status: 'resolution',
         notes: `${original.notes ?? ''};cosigned-by:${signRes.eventHash}:by:${cosignerEmail || cosignerUserId}`,
@@ -177,6 +183,15 @@ export async function coSignResolution(args: {
       },
     }),
   ]);
+
+  // Concurrent-cosign race-loss detection. If r[1].count === 0, another
+  // cosigner won the race between our pre-check and this transaction.
+  // Our cosign event still landed on the chain (which is fine for audit —
+  // it's a "tried to cosign but lost the race" trace), but report it as
+  // an error to the UI so the user doesn't see a phantom success.
+  if (r[1].count === 0) {
+    return { ok: false, error: 'race-lost-already-cosigned' };
+  }
 
   // Magic-link cookie was scoped to THIS resolutionFactId. After cosign
   // success it has served its purpose — clear it so the cosigner doesn't

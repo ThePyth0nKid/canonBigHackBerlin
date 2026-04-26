@@ -36,8 +36,13 @@ export async function reverseResolution(args: {
     return { ok: false, error: 'reason-required' };
   }
 
+  // Workspace-scoped, NOT userId-scoped — any admin can reverse any
+  // admin's resolution. The cosign action already drops userId filtering
+  // for the same reason (different OAuth identity must be able to act on
+  // initiator's row); reverseResolution must follow the same rule or
+  // a 4-eyes resolution becomes uncorrectable by the non-initiator admin.
   const original = await prisma.factEvent.findFirst({
-    where: { id: args.resolutionFactId, userId: admin.userId },
+    where: { id: args.resolutionFactId },
     select: {
       id: true,
       workspace: true,
@@ -56,8 +61,11 @@ export async function reverseResolution(args: {
   const parsed = parseResolutionNotes(original.notes ?? '');
   if (!parsed) return { ok: false, error: 'unparseable-notes' };
 
+  // Chain-tip lookup is workspace-scoped, not user-scoped — the chain
+  // is a single forwards-linked sequence per workspace; signing under a
+  // user-scoped tip would fork the chain whenever a different admin acts.
   const tail = await prisma.factEvent.findFirst({
-    where: { userId: admin.userId, workspace: original.workspace },
+    where: { workspace: original.workspace },
     orderBy: { signedAt: 'desc' },
     select: { eventHash: true },
   });
@@ -126,7 +134,8 @@ export async function reverseResolution(args: {
       prisma.factEvent.updateMany({
         where: {
           id: { in: parsed.loserIds },
-          userId: admin.userId,
+          // Loser id list is signed-event-derived and authoritative;
+          // workspace-scoped to prevent cross-workspace impact only.
           workspace: original.workspace,
           status: 'superseded',
         },
@@ -141,7 +150,8 @@ export async function reverseResolution(args: {
       prisma.factEvent.updateMany({
         where: {
           id: { in: parsed.candidateIds },
-          userId: admin.userId,
+          // Loser id list is signed-event-derived and authoritative;
+          // workspace-scoped to prevent cross-workspace impact only.
           workspace: original.workspace,
         },
         data: { notes: null },

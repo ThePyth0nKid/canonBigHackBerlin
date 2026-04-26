@@ -27,6 +27,7 @@
  */
 
 import { prisma } from '@/lib/prisma';
+import { loadPendingPairKeys } from './pending-view';
 
 export interface SearchResult {
   id: string;
@@ -387,8 +388,15 @@ async function searchByConflict(
     byPair.get(k)!.values.push({ value: t.metricValue, count: t._count._all });
   }
 
+  // Suppress (entity, metricKey) pairs that already have a pending high-risk
+  // resolution proposal — otherwise the initiator would see the same conflict
+  // resurface in AskCanon right after picking it, producing duplicate pending
+  // rows. The pending panel above AskCanon is the canonical surface for these.
+  const pendingPairs = await loadPendingPairKeys(workspace);
+
   const conflicts = [...byPair.values()]
     .filter((p) => p.values.length >= 2)
+    .filter((p) => !pendingPairs.has(`${p.entity}::${p.metricKey}`))
     .sort((a, b) => b.values.length - a.values.length)
     .slice(0, TOP_CLUSTERS);
 

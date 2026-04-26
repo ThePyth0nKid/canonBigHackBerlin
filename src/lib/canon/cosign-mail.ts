@@ -26,6 +26,20 @@ const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const FROM_DEFAULT = 'Canon <decide@ultranova.io>';
 const DEMO_RECIPIENT_DEFAULT = 'nelson@ultranova.io';
 
+/** Domain-tag for cosign HMAC inputs. Without this, a /decide persona
+ *  token and a cosign token would HMAC the same shape under the same
+ *  secret — a future fact-id format change could silently make tokens
+ *  cross-valid. Trivial defence-in-depth. */
+const HMAC_DOMAIN = 'cosign:v1:';
+
+/** Strip CRLF + NUL from any string interpolated into email Subject /
+ *  body. Resend usually sanitises subjects, but the signed claim text
+ *  also embeds these fields; defending here is cheaper than relying on
+ *  upstream behaviour. */
+function safeLine(s: string, max = 200): string {
+  return s.replace(/[\r\n\0]+/g, ' ').slice(0, max).trim();
+}
+
 function getSecret(): string {
   const s = process.env.MAGIC_LINK_SECRET || process.env.CANON_SIGNER_KEY_HEX;
   if (!s) throw new Error('MAGIC_LINK_SECRET (or fallback CANON_SIGNER_KEY_HEX) not set');
@@ -56,7 +70,7 @@ export interface CosignTokenParts {
 export function signCosignToken(input: CosignTokenInput): CosignTokenParts {
   const exp = (input.exp ?? Date.now() + TOKEN_TTL_MS).toString();
   const data = `${input.resolutionFactId}.${input.asEmail.toLowerCase()}.${exp}`;
-  const sig = createHmac('sha256', getSecret()).update(data).digest();
+  const sig = createHmac('sha256', getSecret()).update(HMAC_DOMAIN + data).digest();
   return {
     res: input.resolutionFactId,
     as: input.asEmail.toLowerCase(),
@@ -80,7 +94,7 @@ export function verifyCosignToken(params: {
   const expMs = Number(exp);
   if (!Number.isFinite(expMs) || expMs <= Date.now()) return { ok: false, reason: 'expired' };
   const data = `${res}.${as.toLowerCase()}.${exp}`;
-  const expected = createHmac('sha256', getSecret()).update(data).digest();
+  const expected = createHmac('sha256', getSecret()).update(HMAC_DOMAIN + data).digest();
   let provided: Buffer;
   try {
     provided = fromB64url(sig);
@@ -164,7 +178,9 @@ export async function sendCosignRequestEmails(
     });
     const link = buildCosignMagicUrl(args.baseUrl, tokenParts);
 
-    const subject = `[for ${cosignerEmail}] 4-eyes co-sign needed: ${args.entityDisplay} ${args.metricKey} = ${args.metricValue}`;
+    const subject = safeLine(
+      `[for ${cosignerEmail}] 4-eyes co-sign needed: ${args.entityDisplay} ${args.metricKey} = ${args.metricValue}`,
+    );
     const html = renderHtml({
       cosignerEmail,
       initiatorEmail: args.initiatorEmail,

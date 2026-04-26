@@ -133,3 +133,22 @@ function humanise(slug: string): string {
     .replace(/_/g, ' ')
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
+
+/**
+ * Cheap set of `${entity}::${metricKey}` pairs that currently have a
+ * resolution-pending row in the given workspace. Used by conflict
+ * aggregators to suppress already-proposed pairs — without this, a
+ * high-risk pick that wrote a pending row would still resurface as
+ * an open conflict in AskCanon, prompting the initiator to pick
+ * again and produce a duplicate pending row.
+ *
+ * Workspace-scoped only; admin-gating happens upstream in the page
+ * components that surface the pending panel.
+ */
+export async function loadPendingPairKeys(workspace: string): Promise<Set<string>> {
+  const rows = await prisma.factEvent.findMany({
+    where: { workspace, status: 'resolution-pending' },
+    select: { entity: true, metricKey: true },
+  });
+  return new Set(rows.map((r) => `${r.entity}::${r.metricKey ?? ''}`));
+}

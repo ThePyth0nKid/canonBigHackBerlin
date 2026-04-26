@@ -47,20 +47,37 @@ interface CosignPayload {
   exp: number;
 }
 
+/**
+ * Field separator. `|` cannot appear in resolutionFactId (`f_res_<hex>`),
+ * exp (digits), or sigB64 (base64url alphabet) — and it never appears in
+ * realistic email addresses either, so it's a safe delimiter for asEmail.
+ *
+ * History: an earlier version used `.` as separator, which broke for any
+ * email with a dot in the local-part (e.g. `nelson.mehlis@example.com`)
+ * because `value.split('.')` produced 6+ parts and verify rejected
+ * anything not exactly 4. The audit caught this — see
+ * bigHack/4-eyes-audit.md.
+ */
+const SEP = '|';
+
+/** Domain-tag the HMAC input so cosign tokens cannot be confused with
+ *  /decide persona tokens or any future MAGIC_LINK_SECRET-using flow. */
+const HMAC_DOMAIN = 'cosign:v1:';
+
 function sign(payload: CosignPayload): string {
-  const data = `${payload.resolutionFactId}.${payload.asEmail.toLowerCase()}.${payload.exp}`;
-  const sig = createHmac('sha256', getSecret()).update(data).digest();
-  return `${data}.${b64url(sig)}`;
+  const data = `${payload.resolutionFactId}${SEP}${payload.asEmail.toLowerCase()}${SEP}${payload.exp}`;
+  const sig = createHmac('sha256', getSecret()).update(HMAC_DOMAIN + data).digest();
+  return `${data}${SEP}${b64url(sig)}`;
 }
 
 function verify(value: string): CosignPayload | null {
-  const parts = value.split('.');
+  const parts = value.split(SEP);
   if (parts.length !== 4) return null;
   const [resolutionFactId, asEmail, expStr, sigB64] = parts;
   const exp = Number(expStr);
   if (!Number.isFinite(exp) || exp <= Date.now()) return null;
-  const data = `${resolutionFactId}.${asEmail}.${expStr}`;
-  const expected = createHmac('sha256', getSecret()).update(data).digest();
+  const data = `${resolutionFactId}${SEP}${asEmail}${SEP}${expStr}`;
+  const expected = createHmac('sha256', getSecret()).update(HMAC_DOMAIN + data).digest();
   let provided: Buffer;
   try {
     provided = fromB64url(sigB64);
