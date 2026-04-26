@@ -447,7 +447,9 @@ function parseNotes(notes: string): NotesShape | null {
   };
   const threadId = get('decide:thread') ?? notes.match(/decide:thread=([A-Za-z0-9]+)/)?.[1];
   const conflictFacts = get('conflictFacts');
-  const addresseesRaw = notes.match(/(?:^|:)addressees=(.+)$/)?.[1];
+  // addressees is always the LAST field in notes; `.*` tolerates the
+  // empty list emitted by escalateDirectly's synthetic ask.
+  const addresseesRaw = notes.match(/(?:^|:)addressees=(.*)$/)?.[1];
   return {
     threadId,
     entity: get('entity'),

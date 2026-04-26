@@ -148,15 +148,20 @@ export async function askSourceAuthors(
     .map((f) => f.metricValue ?? '?')
     .join(' vs ')}). Pinged ${addressees.length} of ${facts.length} candidate source(s)${unaskable.length > 0 ? ` — ${unaskable.length} automated source(s) had no human author` : ''}.`;
   const sourceRef = `decide:ask:${threadId}`;
+  // Notes layout: addressees= MUST be the final field. Each addressee value
+  // contains a `:` (kind:id) which would otherwise bleed into a following
+  // field's regex capture. Optional fields go before, addressees last.
   const notes = [
     `decide:thread=${threadId}`,
     `stage=asked`,
     `metricKey=${metricKey}`,
     `entity=${entity}`,
     `conflictFacts=${conflictFactIds.join(',')}`,
+    unaskable.length > 0 ? `unaskable=${unaskable.join(',')}` : null,
     `addressees=${addressees.map((a) => `${a.kind}:${a.id}`).join(',')}`,
-    unaskable.length > 0 ? `unaskable=${unaskable.join(',')}` : 'unaskable=',
-  ].join(':');
+  ]
+    .filter((s): s is string => s !== null)
+    .join(':');
 
   const signer = new CanonSigner();
   signer.start();
@@ -482,15 +487,19 @@ export async function escalateDirectly(
     const askSkippedFactId = newFactId('askSkip');
     const claim = `Ask-source-authors skipped: ${entity}.${metricKey} — all ${facts.length} sources are automated (no human author). Routing straight to authority.`;
     const sourceRef = `decide:ask:${threadId}`;
+    // Notes layout: same as askSourceAuthors — addressees= is the final
+    // field (empty here because this is the no-human-authors path). Other
+    // fields go before so the regex `(?:^|:)addressees=(.*)$` captures
+    // exactly the addressee list and nothing trails into it.
     const notes = [
       `decide:thread=${threadId}`,
       `stage=asked`,
       `metricKey=${metricKey}`,
       `entity=${entity}`,
       `conflictFacts=${conflictFactIds.join(',')}`,
-      `addressees=`,
       `unaskable=${conflictFactIds.join(',')}`,
       `skipped=no_human_authors`,
+      `addressees=`,
     ].join(':');
     const signer = new CanonSigner();
     signer.start();
@@ -668,7 +677,11 @@ function parseThreadNotes(notes: string): ThreadMeta | null {
   const entityMatch = notes.match(/(?:^|:)entity=([^:]+)/);
   const metricKeyMatch = notes.match(/(?:^|:)metricKey=([^:]+)/);
   const conflictFactsMatch = notes.match(/(?:^|:)conflictFacts=([^:]+)/);
-  const addresseesMatch = notes.match(/(?:^|:)addressees=(.+)$/);
+  // Note: addressees is always the LAST field in notes, so this regex
+  // greedy-captures from "addressees=" to end-of-string. `.*` (not `.+`)
+  // tolerates the empty-addressees case used by the synthetic ask in
+  // escalateDirectly (no human authors → empty list).
+  const addresseesMatch = notes.match(/(?:^|:)addressees=(.*)$/);
 
   if (!threadIdMatch || !entityMatch || !metricKeyMatch) return null;
   const conflictFactIds = conflictFactsMatch

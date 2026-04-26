@@ -23,7 +23,14 @@ import { Resend } from 'resend';
 
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const FROM_DEFAULT = 'Canon <decide@ultranova.io>';
-const RELAY_LOCAL_DEFAULT = 'nelson';
+/** Demo recipient. Every magic-link email lands here so the operator can
+ *  show the inbox + the click-through live on stage. The persona identity
+ *  is preserved in the subject prefix and a visible banner inside the
+ *  body — and most importantly, in the magic-link token itself, so when
+ *  the link is clicked /decide hydrates the right addressee identity for
+ *  the audit trail. RFC 6761 `.example` persona addresses don't accept
+ *  mail; routing all asks to a real inbox is what makes the demo work. */
+const DEMO_RECIPIENT_DEFAULT = 'nelson@ultranova.io';
 
 function getSecret(): string {
   const s = process.env.MAGIC_LINK_SECRET || process.env.CANON_SIGNER_KEY_HEX;
@@ -154,8 +161,10 @@ export async function sendAskEmails(args: SendAskEmailsArgs): Promise<SendAskEma
   }
   const resend = new Resend(apiKey);
   const from = process.env.CANON_DECIDE_FROM ?? FROM_DEFAULT;
-  const relayDomain = process.env.EMAIL_FROM_DOMAIN ?? 'ultranova.io';
-  const relayLocal = process.env.CANON_DECIDE_RELAY_LOCAL ?? RELAY_LOCAL_DEFAULT;
+  const demoRecipient =
+    process.env.CANON_DECIDE_DEMO_TO ??
+    process.env.CANON_DEMO_TO ??
+    DEMO_RECIPIENT_DEFAULT;
 
   const result: SendAskEmailsResult = {
     attempted: args.recipients.length,
@@ -164,15 +173,17 @@ export async function sendAskEmails(args: SendAskEmailsArgs): Promise<SendAskEma
   };
 
   for (const r of args.recipients) {
-    const localPart = r.personaEmail.split('@')[0] || 'persona';
-    // Plus-addressing: nelson+alice@ultranova.io. RFC 5233 — receiver
-    // sees only the base mailbox, persona token survives in the address.
-    const smtpTo = `${relayLocal}+${localPart}@${relayDomain}`;
+    // Direct send to a real inbox so the email actually arrives and can be
+    // shown live on stage. Persona identity rides in the subject prefix
+    // ("[for alice@inazuma.example]") and an in-body banner. The magic-link
+    // token still carries the persona, so clicking lands on /decide with
+    // the right "Acting as …" attribution.
+    const smtpTo = demoRecipient;
 
     const tokenParts = signMagicToken({ threadId: args.threadId, as: r.personaEmail });
     const link = buildMagicLinkUrl(args.baseUrl, tokenParts);
 
-    const subject = `Canon: please confirm ${args.entity}.${args.metricKey} (asked of ${r.personaEmail})`;
+    const subject = `[for ${r.personaEmail}] Canon needs your input on ${args.entity}.${args.metricKey}`;
     const html = renderHtml({
       personaEmail: r.personaEmail,
       personaName: r.personaName,
@@ -235,9 +246,16 @@ function renderHtml(args: {
   return `<!doctype html>
 <html>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.5; color: #1f2937; max-width: 560px; margin: 0 auto; padding: 24px;">
+  <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px;">
+    <p style="margin: 0; font-size: 11px; font-family: ui-monospace, monospace; color: #2563eb; text-transform: uppercase; letter-spacing: 0.08em;">
+      Asked of
+    </p>
+    <p style="margin: 2px 0 0; font-size: 15px; font-weight: 600; color: #1e3a8a;">
+      ${escapeHtml(name)} <span style="font-weight: 400; color: #475569;">&lt;${escapeHtml(args.personaEmail)}&gt;</span>
+    </p>
+  </div>
   <h2 style="font-size: 18px; margin: 0 0 12px;">Canon needs your input</h2>
   <p style="font-size: 14px; margin: 0 0 16px;">
-    Hi ${escapeHtml(name)} —<br/>
     Two of your colleagues' systems disagree about
     <strong style="font-family: ui-monospace, monospace;">${escapeHtml(args.entity)}.${escapeHtml(args.metricKey)}</strong>.
     You're listed as a source on this fact, so we'd like you to settle it.
