@@ -20,16 +20,10 @@ interface PageProps {
 /**
  * Customer / decision-maker view.
  *
- * Same auth, same workspace, same ledger as /app — but a *role-shaped*
- * surface: only the conflicts that need a human, plus the "asked of you"
- * inbox if the signed-in user is an addressee. No ingest controls, no
- * full ledger, no proof modal — those live in /app.
- *
- * Magic-link landing: when ?thread=&as=&exp=&sig= is present, the HMAC
- * is verified against MAGIC_LINK_SECRET. On valid tokens, the
- * AuthorResponsePanel locks to the persona and surfaces the matching
- * thread up top — one-click respond. On invalid/expired tokens, the
- * page renders normally (no error, no auth side-effect).
+ * Magic-link landing scopes the page to ONE card so the recipient can
+ * only see the conflict they were asked about — not the full inbox.
+ * (Real per-recipient session auth is V2; the demo's privacy guarantee
+ * is HMAC token presence + thread-id filter.)
  */
 export default async function DecidePage({ searchParams }: PageProps) {
   const session = await auth();
@@ -57,6 +51,21 @@ export default async function DecidePage({ searchParams }: PageProps) {
 
   const inbox = await loadDecisionInbox(userId, 'inazuma', email);
   const openAsks = await loadOpenAuthorAsks(userId, 'inazuma');
+
+  // Magic-link arrival → scope cards to the focused thread only. Other
+  // open conflicts in the workspace stay hidden so the email recipient
+  // can't browse the full ledger from a shared link.
+  const focusedCards = focusThreadId
+    ? inbox.cards.filter((c) => c.thread?.threadId === focusThreadId)
+    : null;
+  const isMagicLinkScope = focusedCards !== null && focusedCards.length > 0;
+  const visibleCards = focusedCards ?? inbox.cards;
+  // When there's a verified token but no matching open card, the thread
+  // was already settled by someone else (or the magic-link points at a
+  // resolved thread). Show a clean "you're done" message rather than
+  // dumping all 50 open decisions on the recipient.
+  const focusedButSettled =
+    focusThreadId !== null && focusedCards !== null && focusedCards.length === 0;
 
   return (
     <main className="flex flex-1 flex-col px-6 py-10">
@@ -98,23 +107,29 @@ export default async function DecidePage({ searchParams }: PageProps) {
             </Link>
           </p>
           <p className="text-[13px] leading-relaxed text-zinc-700 dark:text-zinc-300">
-            {inbox.count === 0
-              ? 'No open decisions. Every conflicting claim has either auto-resolved by majority or been signed by a human.'
-              : `${inbox.count} open conflict${inbox.count === 1 ? '' : 's'} that auto-resolution couldn't settle. Each decision below becomes signed canon for every agent in the workspace.`}
+            {isMagicLinkScope
+              ? `You were asked about one specific conflict. ${inbox.count - 1} other open decision${inbox.count - 1 === 1 ? '' : 's'} in this workspace stay hidden — you only see what was routed to you.`
+              : focusedButSettled
+                ? 'The conflict you were asked about has already been settled by someone else.'
+                : inbox.count === 0
+                  ? 'No open decisions. Every conflicting claim has either auto-resolved by majority or been signed by a human.'
+                  : `${inbox.count} open conflict${inbox.count === 1 ? '' : 's'} that auto-resolution couldn't settle. Each decision below becomes signed canon for every agent in the workspace.`}
           </p>
         </header>
 
         {prefilledRespondingAs && (
           <div className="mb-4 rounded-xl border-2 border-sky-400 bg-sky-50 p-4 dark:border-sky-700 dark:bg-sky-950/50">
             <p className="text-[10px] font-mono uppercase tracking-wide text-sky-600 dark:text-sky-400">
-              Magic-link verified
+              Magic-link verified · scoped view
             </p>
             <p className="mt-1 text-sm font-semibold text-sky-900 dark:text-sky-100">
               Acting as <span className="font-mono">{prefilledRespondingAs}</span>
             </p>
             <p className="mt-1 text-[11px] text-sky-700 dark:text-sky-300">
-              You arrived from an email asking your input on a Canon conflict.
-              Your response will be signed and added to the hash-chained ledger.
+              You arrived from an email about one specific conflict. Other open
+              decisions in this workspace are hidden — you only see what was
+              routed to you. Your response is signed and added to the
+              hash-chained ledger.
             </p>
           </div>
         )}
@@ -135,17 +150,20 @@ export default async function DecidePage({ searchParams }: PageProps) {
           </div>
         )}
 
-        {inbox.cards.length === 0 ? (
+        {visibleCards.length === 0 ? (
           <div className="rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-10 text-center text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950">
-            All clear · 0 open decisions
+            {focusedButSettled
+              ? 'The conflict you were asked about has been settled. Nothing left to decide here.'
+              : 'All clear · 0 open decisions'}
           </div>
         ) : (
           <div className="space-y-4">
-            {inbox.cards.map((card) => (
+            {visibleCards.map((card) => (
               <DecisionCard
                 key={`${card.entity}::${card.metricKey}`}
                 card={card}
                 viewerEmail={email ?? ''}
+                focusedFromMagicLink={isMagicLinkScope}
               />
             ))}
           </div>

@@ -16,6 +16,9 @@ interface Props {
   card: Card;
   /** Email of the signed-in user — recorded on the resolution event. */
   viewerEmail: string;
+  /** True when the card was opened via a verified magic-link. Auto-expands
+   *  details, highlights the border, and shows "your assigned conflict" copy. */
+  focusedFromMagicLink?: boolean;
 }
 
 function sourceKindOf(sourceRef: string): string {
@@ -23,7 +26,6 @@ function sourceKindOf(sourceRef: string): string {
 }
 
 function shortRef(sourceRef: string, max = 64): string {
-  // Strip the persona suffix (#u=… / #from=…) for cleaner display.
   const noSuffix = sourceRef.replace(/#u=[^#]+/g, '').replace(/#from=[^#]+/g, '');
   return noSuffix.length > max ? noSuffix.slice(0, max) + '…' : noSuffix;
 }
@@ -48,10 +50,10 @@ function authorOf(sourceRef: string): string | null {
   return null;
 }
 
-export function DecisionCard({ card, viewerEmail }: Props) {
+export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }: Props) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [showDetails, setShowDetails] = useState(false);
+  const [showDetails, setShowDetails] = useState(focusedFromMagicLink);
   const stage = card.thread?.stage ?? 'fresh';
   void viewerEmail;
 
@@ -100,12 +102,6 @@ export function DecisionCard({ card, viewerEmail }: Props) {
     });
   }
 
-  /**
-   * Direct decide — workspace owner picks a winner immediately, with no ask
-   * or escalation flow. Reuses the existing /app `resolveConflict` server
-   * action so the resulting signed event matches every other "user-pick"
-   * resolution in the ledger.
-   */
   function onDecideDirect(winnerFactId: string) {
     setError(null);
     startTransition(async () => {
@@ -119,8 +115,6 @@ export function DecisionCard({ card, viewerEmail }: Props) {
     });
   }
 
-  // Cluster candidates by metricValue. Within a cluster, all facts share the
-  // same answer — the cluster size is the corroboration count.
   const candidatesByValue = new Map<string, FactRow[]>();
   for (const c of card.candidates) {
     const k = (c.metricValue ?? '?').trim();
@@ -131,14 +125,16 @@ export function DecisionCard({ card, viewerEmail }: Props) {
   const noAuthors = card.authorAvailability === 'none';
   const partialAuthors = card.authorAvailability === 'partial';
   const showAuthorityPickUI = stage === 'escalated';
-  // The workspace-owner direct-decide path is always available. We hide it
-  // behind a toggle when the card is in an in-flight chain so we don't
-  // distract from the normal ask/escalate flow — but it stays one click
-  // away when the owner already knows the answer.
   const directDecideAvailable = stage !== 'resolved';
 
   return (
-    <article className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+    <article
+      className={`rounded-xl border bg-white p-5 shadow-sm dark:bg-zinc-950 ${
+        focusedFromMagicLink
+          ? 'border-2 border-sky-400 shadow-md dark:border-sky-600'
+          : 'border-zinc-200 dark:border-zinc-800'
+      }`}
+    >
       <header className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
@@ -147,6 +143,11 @@ export function DecisionCard({ card, viewerEmail }: Props) {
           <p className="font-mono text-[11px] text-zinc-500">
             {card.entity}.{card.metricKey}
           </p>
+          {focusedFromMagicLink && (
+            <p className="mt-1 font-mono text-[10px] uppercase tracking-wide text-sky-600 dark:text-sky-400">
+              your assigned conflict
+            </p>
+          )}
         </div>
         <StageBadge stage={stage} />
       </header>
@@ -161,9 +162,9 @@ export function DecisionCard({ card, viewerEmail }: Props) {
           <button
             type="button"
             onClick={() => setShowDetails((s) => !s)}
-            className="text-[10px] font-mono uppercase tracking-wide text-sky-600 hover:underline dark:text-sky-400"
+            className="rounded-md border border-sky-300 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-300"
           >
-            {showDetails ? 'hide details' : 'show details'}
+            {showDetails ? '− less info' : '+ more info'}
           </button>
         </div>
         <ul className="space-y-2">
@@ -216,18 +217,38 @@ export function DecisionCard({ card, viewerEmail }: Props) {
                   </div>
                 </div>
                 {showDetails && (
-                  <ul className="mt-2 space-y-1.5 border-t border-zinc-200 pt-2 dark:border-zinc-800">
-                    {facts.map((f) => (
-                      <li key={f.id} className="text-[11px] text-zinc-600 dark:text-zinc-400">
-                        <p className="italic leading-relaxed">
-                          “{f.sourceExcerpt ?? f.claim}”
-                        </p>
-                        <p className="mt-0.5 font-mono text-[10px] text-zinc-500">
-                          {shortRef(f.sourceRef)}
-                          {f.observedAt ? ` · ${relativeTime(f.observedAt)}` : ''}
-                        </p>
-                      </li>
-                    ))}
+                  <ul className="mt-2 space-y-2.5 border-t border-zinc-200 pt-2.5 dark:border-zinc-800">
+                    {facts.map((f) => {
+                      const author = authorOf(f.sourceRef);
+                      const kind = sourceKindOf(f.sourceRef);
+                      return (
+                        <li key={f.id} className="text-[11px] text-zinc-600 dark:text-zinc-400">
+                          <div className="mb-1 flex flex-wrap items-baseline gap-1.5">
+                            <span className="rounded bg-zinc-200 px-1.5 py-0.5 font-mono text-[9px] uppercase text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                              {kind}
+                            </span>
+                            {author && (
+                              <span className="font-mono text-[10px] text-zinc-700 dark:text-zinc-300">
+                                {author}
+                              </span>
+                            )}
+                            {f.observedAt && (
+                              <span className="text-[10px] text-zinc-500">
+                                · {relativeTime(f.observedAt)}
+                              </span>
+                            )}
+                          </div>
+                          <p className="leading-relaxed text-zinc-700 dark:text-zinc-300">
+                            “{f.sourceExcerpt ?? f.claim}”
+                          </p>
+                          <p className="mt-0.5 font-mono text-[10px] text-zinc-500">
+                            ref: {shortRef(f.sourceRef, 80)}
+                            {' · '}
+                            <span className="text-zinc-400">id: {f.id.slice(0, 14)}…</span>
+                          </p>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </li>
@@ -265,6 +286,13 @@ export function DecisionCard({ card, viewerEmail }: Props) {
           <p className="text-[11px] text-zinc-500">
             Routes to <span className="font-medium">{card.escalationRole}</span> ·{' '}
             <span className="font-mono">{card.authorityEmail}</span>
+            {' · '}
+            <a
+              href={`/app#${card.entity}`}
+              className="text-sky-600 hover:underline dark:text-sky-400"
+            >
+              full ledger →
+            </a>
           </p>
           {noAuthors && stage === 'fresh' && (
             <p className="text-[10px] uppercase tracking-wide text-zinc-400">
