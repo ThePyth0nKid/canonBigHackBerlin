@@ -111,7 +111,11 @@ export function buildMagicLinkUrl(baseUrl: string, parts: MagicLinkUrlParts): st
     exp: parts.exp,
     sig: parts.sig,
   });
-  return `${baseUrl.replace(/\/+$/, '')}/decide?${q.toString()}`;
+  // Land on /decide/enter — a server-side route handler verifies the
+  // token, sets the persona cookie, and 302s to a clean /decide URL.
+  // Cookie is the SOLE RBAC anchor; token never persists in browser
+  // history or referrer headers.
+  return `${baseUrl.replace(/\/+$/, '')}/decide/enter?${q.toString()}`;
 }
 
 // ============================================================

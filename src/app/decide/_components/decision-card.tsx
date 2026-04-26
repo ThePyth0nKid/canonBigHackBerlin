@@ -20,6 +20,12 @@ interface Props {
   /** True when the card was opened via a verified magic-link. Auto-expands
    *  details, highlights the border, and shows "your assigned conflict" copy. */
   focusedFromMagicLink?: boolean;
+  /** True when a persona cookie is active (RBAC-restricted scope). Admin
+   *  buttons (Ask, Escalate, Pick as authority, Decide) are hidden — only
+   *  the AuthorResponsePanel's respond buttons remain accessible. Server
+   *  actions also reject admin calls in this mode, so this is a UI mirror
+   *  of the server-side gate, not the gate itself. */
+  personaMode?: boolean;
 }
 
 function sourceKindOf(sourceRef: string): string {
@@ -51,7 +57,12 @@ function authorOf(sourceRef: string): string | null {
   return null;
 }
 
-export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }: Props) {
+export function DecisionCard({
+  card,
+  viewerEmail,
+  focusedFromMagicLink = false,
+  personaMode = false,
+}: Props) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(focusedFromMagicLink);
@@ -135,13 +146,15 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
 
   const noAuthors = card.authorAvailability === 'none';
   const partialAuthors = card.authorAvailability === 'partial';
-  const showAuthorityPickUI = stage === 'escalated';
-  // Direct-decide bypasses the escalation thread. Hide it when the card
-  // is already in an escalation chain — there, the right button is
-  // "Pick as authority" so the resolution stays linked to the thread.
-  // Showing both creates a confusing two-button choice for the same
-  // outcome ("warum sind da jetzt zwei Optionen?").
-  const directDecideAvailable = stage !== 'resolved' && stage !== 'escalated';
+  // Persona mode (RBAC-restricted) hides every admin button. Server-side
+  // these actions also fail with `forbidden_persona_cannot_admin` if
+  // somehow invoked, so the UI gate is a mirror of the server gate, not
+  // the gate itself.
+  const showAuthorityPickUI = stage === 'escalated' && !personaMode;
+  const directDecideAvailable =
+    stage !== 'resolved' && stage !== 'escalated' && !personaMode;
+  const showAskButton = !personaMode;
+  const showEscalateButton = !personaMode;
 
   return (
     <article
@@ -322,7 +335,7 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
           )}
         </div>
         <div className="flex items-center gap-2">
-          {stage === 'fresh' && !noAuthors && (
+          {showAskButton && stage === 'fresh' && !noAuthors && (
             <button
               type="button"
               disabled={pending}
@@ -336,7 +349,7 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
                   : 'Ask source-authors'}
             </button>
           )}
-          {stage === 'fresh' && noAuthors && (
+          {showAskButton && stage === 'fresh' && noAuthors && (
             <button
               type="button"
               disabled={pending}
@@ -346,7 +359,7 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
               {pending ? 'Escalating…' : `Escalate to ${card.escalationRole}`}
             </button>
           )}
-          {(stage === 'diverged' || stage === 'asked' || stage === 'partial_response') && (
+          {showEscalateButton && (stage === 'diverged' || stage === 'asked' || stage === 'partial_response') && (
             <button
               type="button"
               disabled={pending}
@@ -355,6 +368,11 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
             >
               {pending ? 'Escalating…' : 'Escalate'}
             </button>
+          )}
+          {personaMode && (
+            <span className="text-[10px] uppercase tracking-wide text-zinc-400">
+              admin actions restricted
+            </span>
           )}
         </div>
       </footer>

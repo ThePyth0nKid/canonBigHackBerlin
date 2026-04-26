@@ -2,29 +2,30 @@ import { auth } from '@/auth';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { loadDecisionInbox, loadOpenAuthorAsks } from '@/lib/canon/decide-view';
-import { verifyMagicToken } from '@/lib/canon/decide-mail';
+import { readPersonaContext } from '@/lib/canon/persona-cookie';
 import { DecisionCard } from './_components/decision-card';
 import { AuthorResponsePanel } from './_components/author-response-panel';
+import { exitPersonaAction } from './_actions/decide-actions';
 import { TopBar } from '../_components/top-bar';
 
 export const dynamic = 'force-dynamic';
 
 interface PageProps {
   searchParams: Promise<{
-    thread?: string;
-    as?: string;
-    exp?: string;
-    sig?: string;
+    token_error?: string;
   }>;
 }
 
 /**
  * Customer / decision-maker view.
  *
- * Magic-link landing scopes the page to ONE card so the recipient can
- * only see the conflict they were asked about — not the full inbox.
- * (Real per-recipient session auth is V2; the demo's privacy guarantee
- * is HMAC token presence + thread-id filter.)
+ * Two modes, gated server-side:
+ *   - **Admin** (workspace owner, no persona cookie) — full inbox, all
+ *     action buttons enabled. ask / escalate / resolve / decide.
+ *   - **Persona** (magic-link recipient, persona cookie set via
+ *     /decide/enter) — scoped to the cookie's threadId. Admin actions
+ *     are hidden in the UI AND rejected server-side. Only respond
+ *     buttons work, and only for the cookie's persona email.
  */
 export default async function DecidePage({ searchParams }: PageProps) {
   const session = await auth();
@@ -34,21 +35,10 @@ export default async function DecidePage({ searchParams }: PageProps) {
   if (!userId) redirect('/login');
 
   const params = await searchParams;
-  const verifyResult =
-    params.thread || params.as || params.sig || params.exp
-      ? verifyMagicToken({
-          thread: params.thread ?? null,
-          as: params.as ?? null,
-          exp: params.exp ?? null,
-          sig: params.sig ?? null,
-        })
-      : null;
-  const prefilledRespondingAs =
-    verifyResult && verifyResult.ok ? verifyResult.as : null;
-  const focusThreadId =
-    verifyResult && verifyResult.ok ? verifyResult.threadId : null;
-  const tokenError =
-    verifyResult && !verifyResult.ok ? verifyResult.reason : null;
+  const tokenError = params.token_error ?? null;
+  const persona = await readPersonaContext();
+  const prefilledRespondingAs = persona?.as ?? null;
+  const focusThreadId = persona?.threadId ?? null;
 
   const inbox = await loadDecisionInbox(userId, 'inazuma', email);
   const openAsks = await loadOpenAuthorAsks(userId, 'inazuma');
@@ -96,18 +86,35 @@ export default async function DecidePage({ searchParams }: PageProps) {
 
         {prefilledRespondingAs && (
           <div className="mb-4 rounded-xl border-2 border-sky-400 bg-sky-50 p-4 dark:border-sky-700 dark:bg-sky-950/50">
-            <p className="text-[10px] font-mono uppercase tracking-wide text-sky-600 dark:text-sky-400">
-              Magic-link verified · scoped view
-            </p>
-            <p className="mt-1 text-sm font-semibold text-sky-900 dark:text-sky-100">
-              Acting as <span className="font-mono">{prefilledRespondingAs}</span>
-            </p>
-            <p className="mt-1 text-[11px] text-sky-700 dark:text-sky-300">
-              You arrived from an email about one specific conflict. Other open
-              decisions in this workspace are hidden — you only see what was
-              routed to you. Your response is signed and added to the
-              hash-chained ledger.
-            </p>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-[10px] font-mono uppercase tracking-wide text-sky-600 dark:text-sky-400">
+                  Persona-scoped view · admin actions restricted
+                </p>
+                <p className="mt-1 text-sm font-semibold text-sky-900 dark:text-sky-100">
+                  Acting as <span className="font-mono">{prefilledRespondingAs}</span>
+                </p>
+                <p className="mt-1 text-[11px] text-sky-700 dark:text-sky-300">
+                  Source-author scope. You can confirm or deny your own claim;
+                  Pick-as-authority, Ask, Escalate are workspace-authority only
+                  and rejected server-side here. Other open decisions stay hidden.
+                </p>
+              </div>
+              <form
+                action={async () => {
+                  'use server';
+                  await exitPersonaAction();
+                  redirect('/decide');
+                }}
+              >
+                <button
+                  type="submit"
+                  className="whitespace-nowrap rounded-md border border-sky-400 bg-white px-2.5 py-1 text-[11px] font-medium text-sky-700 hover:bg-sky-100 dark:border-sky-600 dark:bg-zinc-900 dark:text-sky-300 dark:hover:bg-sky-950"
+                >
+                  Exit persona
+                </button>
+              </form>
+            </div>
           </div>
         )}
         {tokenError && (
@@ -141,6 +148,7 @@ export default async function DecidePage({ searchParams }: PageProps) {
                 card={card}
                 viewerEmail={email ?? ''}
                 focusedFromMagicLink={isMagicLinkScope}
+                personaMode={Boolean(prefilledRespondingAs)}
               />
             ))}
           </div>

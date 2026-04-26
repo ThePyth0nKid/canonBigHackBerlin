@@ -11,8 +11,19 @@ import {
   type ResponseChoice,
 } from '@/lib/canon/decide';
 import { sendAskEmails, sendEscalationNotification } from '@/lib/canon/decide-mail';
+import {
+  readPersonaContext,
+  clearPersonaCookie,
+  type PersonaContext,
+} from '@/lib/canon/persona-cookie';
+import { emailForRole, routeMetricToRole } from '@/lib/canon/escalation-policy';
 
-async function requireUser(): Promise<{ userId: string; email: string } | null> {
+interface AuthedUser {
+  userId: string;
+  email: string;
+}
+
+async function requireUser(): Promise<AuthedUser | null> {
   const session = await auth();
   if (!session?.user) return null;
   const userId = (session.user as { id?: string }).id;
@@ -21,13 +32,60 @@ async function requireUser(): Promise<{ userId: string; email: string } | null> 
   return { userId, email };
 }
 
+/**
+ * RBAC gate: admin actions (ask, escalate, resolve, decide-direct) are
+ * permitted ONLY when no persona cookie is present. A persona cookie means
+ * the request is acting under a magic-link recipient's scope; admin
+ * surface is forbidden in that mode regardless of session identity.
+ */
+async function requireAdmin(): Promise<
+  | { ok: true; user: AuthedUser }
+  | { ok: false; reason: 'auth' | 'forbidden_persona_cannot_admin' }
+> {
+  const me = await requireUser();
+  if (!me) return { ok: false, reason: 'auth' };
+  const persona = await readPersonaContext();
+  if (persona) return { ok: false, reason: 'forbidden_persona_cannot_admin' };
+  return { ok: true, user: me };
+}
+
+/**
+ * RBAC gate: persona-scoped actions (recordResponse) require a valid
+ * persona cookie matching the threadId being acted on AND the persona
+ * email being responded as. Both checks server-side — clients can't
+ * forge a persona without the MAGIC_LINK_SECRET.
+ */
+async function requirePersona(args: {
+  threadId: string;
+  respondingAs: string;
+}): Promise<
+  | { ok: true; user: AuthedUser; persona: PersonaContext }
+  | {
+      ok: false;
+      reason: 'auth' | 'forbidden_no_persona' | 'forbidden_thread_mismatch' | 'forbidden_persona_mismatch';
+    }
+> {
+  const me = await requireUser();
+  if (!me) return { ok: false, reason: 'auth' };
+  const persona = await readPersonaContext();
+  if (!persona) return { ok: false, reason: 'forbidden_no_persona' };
+  if (persona.threadId !== args.threadId) {
+    return { ok: false, reason: 'forbidden_thread_mismatch' };
+  }
+  if (persona.as.toLowerCase() !== args.respondingAs.toLowerCase()) {
+    return { ok: false, reason: 'forbidden_persona_mismatch' };
+  }
+  return { ok: true, user: me, persona };
+}
+
 export async function askSourceAuthorsAction(input: {
   entity: string;
   metricKey: string;
   conflictFactIds: string[];
 }) {
-  const me = await requireUser();
-  if (!me) return { ok: false as const, reason: 'auth' };
+  const gate = await requireAdmin();
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  const me = gate.user;
 
   const result = await askCore({
     userId: me.userId,
@@ -134,15 +192,18 @@ export async function recordResponseAction(input: {
   choice: ResponseChoice;
   chosenFactId?: string;
   /**
-   * Logical addressee identity to attribute this response to. In V1 the
-   * signed-in workspace owner is implicitly authorized to respond on behalf
-   * of any addressee — the audit trail still records who logically answered.
-   * Real per-addressee auth is V2.
+   * Logical addressee identity. Server-side this MUST match the persona
+   * cookie's `as` field — the cookie is the only way to prove the caller
+   * holds a valid magic-link for this thread.
    */
   respondingAs: string;
 }) {
-  const me = await requireUser();
-  if (!me) return { ok: false as const, reason: 'auth' };
+  const gate = await requirePersona({
+    threadId: input.threadId,
+    respondingAs: input.respondingAs,
+  });
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  const me = gate.user;
   return respondCore({
     userId: me.userId,
     responderEmail: input.respondingAs,
@@ -153,8 +214,9 @@ export async function recordResponseAction(input: {
 }
 
 export async function escalateAction(input: { threadId: string }) {
-  const me = await requireUser();
-  if (!me) return { ok: false as const, reason: 'auth' };
+  const gate = await requireAdmin();
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  const me = gate.user;
   const result = await escalateCore({ userId: me.userId, threadId: input.threadId });
   // Notification email so the demo flow shows a fresh email for every
   // escalation click. The role's authority is the recipient identity in
@@ -181,8 +243,9 @@ export async function escalateDirectlyAction(input: {
   metricKey: string;
   conflictFactIds: string[];
 }) {
-  const me = await requireUser();
-  if (!me) return { ok: false as const, reason: 'auth' };
+  const gate = await requireAdmin();
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  const me = gate.user;
   const result = await escalateDirectCore({
     userId: me.userId,
     entity: input.entity,
@@ -258,8 +321,12 @@ export async function resolveByAuthorityAction(input: {
   threadId: string;
   winnerFactId: string;
 }) {
-  const me = await requireUser();
-  if (!me) return { ok: false as const, reason: 'auth' };
+  // Authority pick is admin-only. Workspace owner can sign as any role
+  // (V1 owner-trust); a routed authority would in V2 also be allowed
+  // when session.email matches the role's authority email.
+  const gate = await requireAdmin();
+  if (!gate.ok) return { ok: false as const, reason: gate.reason };
+  const me = gate.user;
   return resolveCore({
     userId: me.userId,
     authorityEmail: me.email,
@@ -267,3 +334,18 @@ export async function resolveByAuthorityAction(input: {
     winnerFactId: input.winnerFactId,
   });
 }
+
+/**
+ * Clears the persona cookie. Called from the "Exit persona" link in the
+ * /decide UI when the workspace owner wants to return to admin scope
+ * without waiting for the 30-min cookie TTL.
+ */
+export async function exitPersonaAction(): Promise<{ ok: true }> {
+  await clearPersonaCookie();
+  return { ok: true };
+}
+
+// Avoid unused-import warnings — these helpers are imported for symmetry
+// with the V1 owner-trust comments and used by future authority gating.
+void emailForRole;
+void routeMetricToRole;
