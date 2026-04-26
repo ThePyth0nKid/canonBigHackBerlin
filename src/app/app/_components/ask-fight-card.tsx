@@ -18,6 +18,7 @@
 
 import { useState, useTransition } from 'react';
 import { resolveConflict } from '../_actions/resolve';
+import { reverseResolution } from '../_actions/reverse-resolution';
 import type { ConflictCandidate, InlineConflict } from '@/lib/canon/ask';
 import { BrandChip, brandFor } from './ask-source-brand';
 import { useConfirmStep } from './use-confirm-step';
@@ -43,6 +44,7 @@ export function AskFightCard({
   const [pending, start] = useTransition();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const [reverseNote, setReverseNote] = useState<string | null>(null);
   const confirm = useConfirmStep(1500);
 
   const allFactIds = conflict.candidates.map((c) => c.factId);
@@ -217,19 +219,25 @@ export function AskFightCard({
       )}
 
       {outcome && (
-        <footer className="border-t border-emerald-200 bg-emerald-50 px-4 py-2 font-mono text-[10px] text-emerald-900 dark:border-emerald-800/50 dark:bg-emerald-950/40 dark:text-emerald-200">
-          <span className="font-semibold uppercase tracking-wider">signed</span>
-          <span className="ml-2">
-            {outcome.kind === 'canonical'
-              ? `canonical · ${outcome.superseded} superseded`
-              : 'distinct records · none superseded'}
-          </span>
-          {outcome.resolutionFactId && (
-            <span className="ml-2 opacity-60">
-              {outcome.resolutionFactId.slice(0, 18)}…
-            </span>
-          )}
-        </footer>
+        <SignedFooter
+          outcome={outcome}
+          onReversed={(reactivated) => {
+            // Re-arm the card for a fresh decision: clear outcome, drop any
+            // pending state, surface a note that the reverse signed.
+            setOutcome(null);
+            setPendingId(null);
+            setError(null);
+            setReverseNote(
+              `↺ Reverse-resolution signed at chain tip · ${reactivated} fact${reactivated === 1 ? '' : 's'} re-activated`,
+            );
+          }}
+        />
+      )}
+
+      {reverseNote && !outcome && (
+        <p className="border-t border-amber-300 bg-amber-50 px-4 py-2 font-mono text-[10px] text-amber-900 dark:border-amber-700/50 dark:bg-amber-950/40 dark:text-amber-200">
+          {reverseNote}
+        </p>
       )}
 
       {error && (
@@ -353,5 +361,127 @@ function CandidateRow({
         )}
       </div>
     </li>
+  );
+}
+
+/**
+ * Outcome footer with admin-reverse affordance.
+ *
+ * The reverse path is gated server-side (requireAdmin in
+ * reverseResolution); the button is always rendered so the demo flow
+ * works in any session, but a non-admin click returns a clear
+ * 'admin-required' error which we surface inline.
+ *
+ * On success the parent re-arms the fight card (clears outcome state)
+ * so the original candidates re-render. The reverse event itself is
+ * permanent on the chain — the audit trail reads forwards (resolution)
+ * and backwards (reverse-of:hash) without ever rewriting history.
+ */
+function SignedFooter({
+  outcome,
+  onReversed,
+}: {
+  outcome: FightOutcome;
+  onReversed: (reactivated: number) => void;
+}) {
+  const [reverseOpen, setReverseOpen] = useState(false);
+  const [reverseReason, setReverseReason] = useState('');
+  const [reversePending, startReverse] = useTransition();
+  const [reverseError, setReverseError] = useState<string | null>(null);
+
+  function submitReverse() {
+    setReverseError(null);
+    startReverse(async () => {
+      try {
+        const r = await reverseResolution({
+          resolutionFactId: outcome.resolutionFactId,
+          reason: reverseReason,
+        });
+        if (!r.ok) {
+          setReverseError(
+            r.error === 'admin-required'
+              ? 'Admin role required to reverse a signed resolution.'
+              : r.error,
+          );
+          return;
+        }
+        onReversed(r.reactivated);
+      } catch (e) {
+        setReverseError((e as Error).message ?? 'Reverse failed');
+      }
+    });
+  }
+
+  return (
+    <footer className="border-t border-emerald-200 bg-emerald-50 px-4 py-2 dark:border-emerald-800/50 dark:bg-emerald-950/40">
+      <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[10px] text-emerald-900 dark:text-emerald-200">
+        <div>
+          <span className="font-semibold uppercase tracking-wider">signed</span>
+          <span className="ml-2">
+            {outcome.kind === 'canonical'
+              ? `canonical · ${outcome.superseded} superseded`
+              : 'distinct records · none superseded'}
+          </span>
+          {outcome.resolutionFactId && (
+            <span className="ml-2 opacity-60">
+              {outcome.resolutionFactId.slice(0, 18)}…
+            </span>
+          )}
+        </div>
+        {!reverseOpen && outcome.resolutionFactId && (
+          <button
+            type="button"
+            onClick={() => setReverseOpen(true)}
+            className="inline-flex h-6 items-center justify-center rounded-full border border-emerald-700/50 bg-white/40 px-2 font-mono text-[9px] font-semibold uppercase tracking-wider text-emerald-900 hover:bg-white/80 dark:border-emerald-500/40 dark:bg-black/30 dark:text-emerald-100 dark:hover:bg-black/50"
+            title="Sign a reverse-resolution event (admin only) — re-activates the superseded facts and records the reversal on the chain."
+          >
+            ↺ reverse · admin
+          </button>
+        )}
+      </div>
+
+      {reverseOpen && (
+        <div className="mt-2 space-y-2 rounded-md border border-emerald-300 bg-white/70 p-2 dark:border-emerald-700/50 dark:bg-black/30">
+          <label className="block font-mono text-[9px] uppercase tracking-wider text-emerald-800 dark:text-emerald-300">
+            reason · permanent on chain
+          </label>
+          <textarea
+            value={reverseReason}
+            onChange={(e) => setReverseReason(e.target.value)}
+            placeholder="e.g. wrong winner — contract value 240k was a typo, real ARR is 2.4M"
+            disabled={reversePending}
+            rows={2}
+            className="w-full resize-y rounded-md border border-emerald-300 bg-white p-2 font-mono text-[10px] leading-snug text-zinc-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60 dark:border-emerald-700/40 dark:bg-zinc-950 dark:text-zinc-100"
+          />
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setReverseOpen(false);
+                setReverseReason('');
+                setReverseError(null);
+              }}
+              disabled={reversePending}
+              className="inline-flex h-7 items-center justify-center rounded-full border border-zinc-300 px-3 font-mono text-[10px] font-semibold uppercase tracking-wider text-zinc-700 hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+            >
+              cancel
+            </button>
+            <button
+              type="button"
+              onClick={submitReverse}
+              disabled={reversePending || reverseReason.trim().length < 3}
+              className="inline-flex h-7 items-center justify-center rounded-full bg-amber-700 px-3 font-mono text-[10px] font-semibold uppercase tracking-wider text-white hover:bg-amber-800 disabled:bg-amber-400 dark:bg-amber-600 dark:hover:bg-amber-700"
+            >
+              {reversePending ? 'signing reverse…' : 'sign reverse-resolution'}
+            </button>
+          </div>
+          {reverseError && (
+            <p className="font-mono text-[10px] text-rose-700 dark:text-rose-300">
+              {reverseError}
+            </p>
+          )}
+        </div>
+      )}
+    </footer>
   );
 }
