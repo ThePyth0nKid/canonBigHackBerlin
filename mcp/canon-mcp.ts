@@ -4,12 +4,20 @@
  * over the Model Context Protocol via stdio.
  *
  * Tools:
+ *   canon_workspaces       — ledger summary per workspace
  *   canon_lookup           — all active facts for an entity (slug)
  *   canon_search           — free-text substring match across all active facts
  *   canon_cite             — full audit-chain proof for a single factId
  *   canon_diff             — facts created/changed since an ISO date  (stub-light: time-window)
  *   canon_external_lookup  — UNSIGNED public-web context via Tavily (signed/unsigned split)
- *   canon_write            — propose a new fact (NOT IMPLEMENTED in v0.1)
+ *   canon_write            — sign a new fact (one draft through the shared scan→sign pipeline)
+ *   canon_conflicts        — list pending (entity, metric) conflicts as a numbered picker
+ *   canon_resolve          — sign a ResolutionEvent (canonical-pick or distinct-records)
+ *
+ * Skills (.claude/skills/canon-write, .claude/skills/canon-resolve) wrap the
+ * write+conflicts+resolve tools in an interactive terminal UX (preview-and-
+ * confirm for writes, checkbox-style picker for resolves). The MCP gives
+ * capabilities; the skills give workflow.
  *
  * Demo workspace = the most-recently-created User. Default workspace = inazuma
  * (post-pivot single-workspace world; clients/vendors/products/sales/policies
@@ -42,16 +50,17 @@ import { searchExternal } from '../src/lib/canon/tavily.js';
 // MCP agents and the in-app box give bit-identical results. Critical for
 // the demo claim "you can ask via UI OR via Claude Code MCP — same code".
 import { searchFacts as sharedSearchFacts } from '../src/lib/canon/search.js';
+// Shared sign+persist pipeline — canon_write is one draft through the same
+// scan→sign→persist code path Slack/Gmail/PDF facts go through. One chain.
+import { runPipeline } from '../src/lib/canon/pipeline.js';
+// Shared resolution lib — canon_resolve emits the SAME ResolutionEvent
+// shape as the AskCanon "Sign as canonical →" button. UI-click and
+// terminal-pick are bit-identical to a verifier.
+import { resolveCanonical, resolveDistinct } from '../src/lib/canon/resolve.js';
 // Use the same prisma singleton the Next.js app uses so both processes
 // (Next dev/prod + MCP server) don't each spawn their own pool inside the
 // same node instance when MCP delegates to shared libs.
 import { prisma } from '../src/lib/prisma.js';
-
-// Prisma client comes from the shared @/lib/prisma singleton (imported
-// above). Originally MCP spun up its own PrismaClient — that was fine when
-// MCP was self-contained, but now that we share search/lookup code with the
-// Next app, two pools in the same node process is wasteful and fights for
-// connections. One singleton, one pool.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -134,11 +143,6 @@ async function canonLookup(entityArg: string, workspace?: string) {
   const rows = await prisma.factEvent.findMany({
     where: { userId, workspace: ws, entity: slug, status: 'active' },
     orderBy: { signedAt: 'asc' },
-    // Pull signerPubkey + parentHash + sourceExcerpt so the formatter can
-    // render the trust footer (chain integrity) AND the verbatim source
-    // line for each fact — agents (and the human reading the answer) get
-    // both the cryptographic provenance AND the human-readable source
-    // text without a follow-up canon_cite round-trip.
     select: {
       id: true, entity: true, claim: true, sourceRef: true,
       signedAt: true, eventHash: true, signerPubkey: true, parentHash: true,
@@ -147,7 +151,6 @@ async function canonLookup(entityArg: string, workspace?: string) {
   });
 
   if (rows.length === 0) {
-    // Fallback: case-insensitive contains, in case the agent passed display name.
     const fuzzy = await prisma.factEvent.findMany({
       where: {
         userId,
@@ -203,8 +206,6 @@ async function canonWorkspaces() {
   lines.push('# Canon ledger summary');
   lines.push('');
   for (const c of counts.sort((a, b) => b._count._all - a._count._all)) {
-    // Post-pivot the only live workspace is `inazuma`. Stale `northwind`
-    // rows from the legacy demo would still surface here for audit clarity.
     const label =
       c.workspace === 'inazuma'
         ? 'Inazuma.co (live · D2C consumer-electronics, full org dataset)'
@@ -263,11 +264,6 @@ function formatLookup(slug: string, workspace: string, rows: FactRowForFormat[])
   return lines.join('\n');
 }
 
-/**
- * One-line summary of the chain integrity for the returned set:
- * how many distinct signers signed it + the kid + the genesis-to-tail span.
- * Designed so an agent (Claude) can quote it verbatim as the "trust" line.
- */
 function formatTrustFooter(rows: FactRowForFormat[]): string {
   if (rows.length === 0) return '';
   const signers = new Set(rows.map((r) => r.signerPubkey));
@@ -282,7 +278,6 @@ function formatTrustFooter(rows: FactRowForFormat[]): string {
   );
 }
 
-/** Mirrors src/lib/canon/verify-js.ts deriveKid: "canon/" + first 16 hex of pubkey. */
 function deriveKidFromPubkey(wire: string): string {
   const b64 = wire.startsWith('ed25519:') ? wire.slice('ed25519:'.length) : wire;
   try {
@@ -305,9 +300,6 @@ async function canonSearch(query: string, workspace?: string) {
   const q = query.trim();
   if (!q) return errorBlock('query is required');
 
-  // Delegated to the shared sharedSearchFacts() so this matches the
-  // Ask-Canon UI exactly: same tokenization, same entity-name boost,
-  // same scoring + ranking. If you ever change ranking, change it once.
   const rows = await sharedSearchFacts(userId, q, { workspace: ws, limit: 20 });
 
   if (rows.length === 0) {
@@ -415,15 +407,295 @@ async function canonDiff(entityArg: string, sinceISO: string, workspace?: string
   return textBlock(lines.join('\n'));
 }
 
-async function canonWrite(_entity: string, _claim: string) {
-  // Intentional stub: the existing scan→sign→persist pipeline lives in
-  // src/lib/canon/pipeline.ts and is wired to the Next.js API.  Hooking
-  // agent-driven writes into it is v0.2 work.
-  return textBlock(
-    'canon_write is not implemented yet (coming in v0.2). ' +
-      'Today, facts are only written via the Canon ingest pipeline ' +
-      '(PDF/Slack/Gmail adapters → scan → sign → FactEvent).',
+async function canonWrite(args: {
+  entity: string;
+  claim: string;
+  sourceRef?: string;
+  sourceExcerpt: string;
+  metricKey?: string;
+  metricValue?: string;
+  metricUnit?: string;
+  workspace?: string;
+}) {
+  const userId = await resolveDemoUserId();
+  const ws = normalizeWorkspace(args.workspace);
+  const entity = args.entity.trim().toLowerCase();
+  const claim = args.claim.trim();
+  const excerpt = args.sourceExcerpt.trim();
+
+  if (!entity) return errorBlock('entity is required');
+  if (!claim) return errorBlock('claim is required (one-sentence factual statement)');
+  if (!excerpt)
+    return errorBlock('sourceExcerpt is required (1-2 lines of original text for citation)');
+
+  // Default sourceRef pattern: manual:agent-claude:<ISO>. Makes agent-driven
+  // writes trivially identifiable in the source-kind facet ("manual") and
+  // greppable in the chain. Caller can override with anything stable.
+  const nowIso = new Date().toISOString();
+  const sourceRef = (args.sourceRef ?? `manual:agent-claude:${nowIso}`).trim();
+
+  // skipAudit:true — the agent IS the auditor here. Doubling the Gemini call
+  // would add ~2s latency and a circular Gemini-rates-Gemini check. The local
+  // PII scan still runs (it's part of decide()) — secrets get redacted.
+  let result;
+  try {
+    result = await runPipeline({
+      userId,
+      workspace: ws,
+      contextLabel: `agent-write:${entity}`,
+      context: excerpt,
+      skipAudit: true,
+      drafts: [
+        {
+          entity,
+          claim,
+          sourceRef,
+          sourceExcerpt: excerpt,
+          observedAt: nowIso,
+          metric:
+            args.metricKey && args.metricValue
+              ? { key: args.metricKey, value: args.metricValue, unit: args.metricUnit }
+              : undefined,
+        },
+      ],
+    });
+  } catch (e) {
+    return errorBlock(`pipeline failed: ${(e as Error).message}`);
+  }
+
+  const outcome = result.outcomes[0];
+  if (!outcome) return errorBlock('pipeline returned no outcome');
+
+  const lines: string[] = [];
+  lines.push(`# Canon write — signed ✓`);
+  lines.push('');
+  lines.push(`entity:        ${entity} (${entityDisplay(entity)})`);
+  lines.push(`claim:         ${claim}`);
+  lines.push(`status:        ${outcome.status}` + (outcome.notes ? ` (${outcome.notes})` : ''));
+  lines.push(`workspace:     ${ws}`);
+  lines.push(`sourceRef:     ${sourceRef}`);
+  lines.push(`factId:        ${outcome.factId}`);
+  lines.push(`eventHash:     ${outcome.eventHash || '(not signed)'}`);
+  lines.push(`chain tip now: ${outcome.parentHashForNext || '(empty)'}`);
+  lines.push('');
+  if (outcome.status === 'redacted') {
+    lines.push(
+      `⚠ The local PII/secret scanner flagged this fact — claim+excerpt were stored as <redacted>. ` +
+        `The signed event is on the chain (audit trail intact) but the content is not retrievable. ` +
+        `If this was a false positive, write a fresh claim without the trigger pattern.`,
+    );
+  } else {
+    lines.push(
+      `Verifiable via canon_cite({factId: "${outcome.factId}"}) — returns the full COSE_Sign1 ` +
+        `envelope for offline Ed25519 verification.`,
+    );
+  }
+  return textBlock(lines.join('\n'));
+}
+
+interface ConflictPickerValue {
+  letter: string;
+  displayValue: string;
+  factIds: string[];
+  sources: string[];
+}
+
+interface ConflictPickerGroup {
+  number: number;
+  entity: string;
+  metricKey: string;
+  values: ConflictPickerValue[];
+  totalFacts: number;
+}
+
+async function canonConflicts(args: { entity?: string; workspace?: string; limit?: number }) {
+  const userId = await resolveDemoUserId();
+  const ws = normalizeWorkspace(args.workspace);
+  const entityFilter = args.entity?.trim().toLowerCase();
+  const limit = Math.min(Math.max(args.limit ?? 25, 1), 100);
+
+  const facts = await prisma.factEvent.findMany({
+    where: {
+      userId,
+      workspace: ws,
+      status: 'active',
+      metricKey: { not: null },
+      ...(entityFilter ? { entity: entityFilter } : {}),
+    },
+    orderBy: { observedAt: 'desc' },
+    select: {
+      id: true,
+      entity: true,
+      metricKey: true,
+      metricValue: true,
+      metricUnit: true,
+      sourceRef: true,
+    },
+  });
+
+  const groupMap = new Map<string, typeof facts>();
+  for (const f of facts) {
+    if (!f.metricKey) continue;
+    const key = `${f.entity}::${f.metricKey}`;
+    if (!groupMap.has(key)) groupMap.set(key, []);
+    groupMap.get(key)!.push(f);
+  }
+
+  const conflictGroups: ConflictPickerGroup[] = [];
+  let n = 1;
+  for (const [groupKey, members] of groupMap) {
+    if (members.length < 2) continue;
+    const byValue = new Map<string, typeof members>();
+    for (const f of members) {
+      const vk = normalizeConflictValue(f.metricValue ?? '');
+      if (!vk) continue;
+      if (!byValue.has(vk)) byValue.set(vk, []);
+      byValue.get(vk)!.push(f);
+    }
+    if (byValue.size < 2) continue; // pure corroboration → not a conflict
+
+    const [entity, metricKey] = groupKey.split('::');
+    const valueClusters = [...byValue.entries()].sort(
+      (a, b) => b[1].length - a[1].length,
+    );
+
+    const values: ConflictPickerValue[] = valueClusters.map(([, fs], i) => ({
+      letter: String.fromCharCode(97 + i),
+      displayValue: fs[0].metricValue ?? '(no value)',
+      factIds: fs.map((f) => f.id),
+      sources: [...new Set(fs.map((f) => sourceKindOf(f.sourceRef)))],
+    }));
+
+    conflictGroups.push({
+      number: n++,
+      entity,
+      metricKey,
+      values,
+      totalFacts: members.length,
+    });
+
+    if (conflictGroups.length >= limit) break;
+  }
+
+  if (conflictGroups.length === 0) {
+    return textBlock(
+      `No open conflicts in workspace "${ws}"` +
+        (entityFilter ? ` for entity "${entityFilter}"` : '') +
+        `. Everything is corroborated or single-source.`,
+    );
+  }
+
+  const lines: string[] = [];
+  lines.push(
+    `# Open conflicts in workspace ${ws}${entityFilter ? ` · entity ${entityFilter}` : ''} · ${conflictGroups.length} group(s)`,
   );
+  lines.push('');
+  lines.push(
+    'Each numbered group is one (entity, metric) with ≥2 distinct values. ' +
+      'Letters identify the candidate values within a group. ' +
+      'IMPORTANT: surface this list verbatim to the human and ask them to pick — never auto-resolve.',
+  );
+  lines.push('');
+  for (const g of conflictGroups) {
+    lines.push(
+      `  [${g.number}] ${g.entity} · ${g.metricKey}    (${g.totalFacts} fact${g.totalFacts === 1 ? '' : 's'} total)`,
+    );
+    for (const v of g.values) {
+      const srcSummary =
+        v.sources.length === 1
+          ? v.sources[0]
+          : `${v.sources.length} sources (${v.sources.join(', ')})`;
+      lines.push(
+        `        ${v.letter}) ${v.displayValue}   · ${v.factIds.length} fact${v.factIds.length === 1 ? '' : 's'} · ${srcSummary}`,
+      );
+      lines.push(`             factIds: ${v.factIds.join(', ')}`);
+    }
+    lines.push('');
+  }
+  lines.push('---');
+  lines.push('To resolve, call canon_resolve. Two modes:');
+  lines.push(
+    '  • mode="canonical" + winnerFactId=<one of the factIds in the chosen letter> → that value is signed as truth, the others get superseded',
+  );
+  lines.push(
+    '  • mode="distinct"  + candidateFactIds=[all factIds across all letters in the group] → all stay active, signed acknowledgement that they are independent records',
+  );
+  lines.push('');
+  lines.push(
+    'Each canon_resolve call extends the same Ed25519 hash chain — UI-click and terminal-pick are bit-identical to a verifier.',
+  );
+  return textBlock(lines.join('\n'));
+}
+
+/** Mirror of conflicts.ts normalizeValue — kept private to avoid coupling. */
+function normalizeConflictValue(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[\s,€$£¥]/g, '')
+    .replace(/k\b/, '000')
+    .replace(/m\b/, '000000')
+    .trim();
+}
+
+async function canonResolve(args:
+  | { mode: 'canonical'; entity: string; metricKey: string; winnerFactId: string }
+  | { mode: 'distinct'; entity: string; metricKey: string; candidateFactIds: string[] },
+) {
+  const userId = await resolveDemoUserId();
+  const entity = args.entity.trim().toLowerCase();
+  const metricKey = args.metricKey.trim();
+  if (!entity) return errorBlock('entity is required');
+  if (!metricKey) return errorBlock('metricKey is required');
+
+  const result =
+    args.mode === 'canonical'
+      ? await resolveCanonical({
+          userId,
+          entity,
+          metricKey,
+          winnerFactId: args.winnerFactId.trim(),
+        })
+      : await resolveDistinct({
+          userId,
+          entity,
+          metricKey,
+          candidateFactIds: args.candidateFactIds.map((s) => s.trim()).filter(Boolean),
+        });
+
+  if (!result.ok) {
+    return errorBlock(`resolve failed: ${result.reason ?? 'unknown'}`);
+  }
+
+  const lines: string[] = [];
+  lines.push(`# Canon resolve — signed ResolutionEvent ✓`);
+  lines.push('');
+  lines.push(`mode:                ${args.mode}`);
+  lines.push(`entity:              ${entity} (${entityDisplay(entity)})`);
+  lines.push(`metricKey:           ${metricKey}`);
+  lines.push(`workspace:           ${result.workspace}`);
+  lines.push(`resolutionFactId:    ${result.resolutionFactId}`);
+  lines.push(`eventHash:           ${result.eventHash}`);
+  lines.push(`chained onto parent: ${result.parentHash || '(genesis)'}`);
+  lines.push(
+    `superseded:          ${result.superseded} fact(s) flipped to status='superseded'`,
+  );
+  lines.push('');
+  if (args.mode === 'canonical') {
+    lines.push(
+      `The picked value is now the only active fact for (${entity}, ${metricKey}). ` +
+        `Re-call canon_search or canon_lookup to confirm the conflict is gone.`,
+    );
+  } else {
+    lines.push(
+      `All ${args.candidateFactIds.length} candidates remain active — the chain ` +
+        `now records that a human reviewed them and confirmed they are independent records.`,
+    );
+  }
+  lines.push('');
+  lines.push(
+    `Verifiable via canon_cite({factId: "${result.resolutionFactId}"}) — returns the full COSE_Sign1 envelope.`,
+  );
+  return textBlock(lines.join('\n'));
 }
 
 async function canonExternalLookup(
@@ -483,7 +755,6 @@ async function canonExternalLookup(
 // ---------------------------------------------------------------------------
 
 async function main() {
-  // Resolve demo workspace eagerly so misconfig surfaces at boot, not at first call.
   try {
     await resolveDemoUserId();
   } catch (e) {
@@ -491,7 +762,7 @@ async function main() {
   }
 
   const server = new McpServer(
-    { name: 'canon', version: '0.1.0' },
+    { name: 'canon', version: '0.2.0' },
     { capabilities: { tools: {} } },
   );
 
@@ -636,24 +907,149 @@ async function main() {
   server.registerTool(
     'canon_write',
     {
-      title: 'Canon — write fact (stub, v0.2)',
+      title: 'Canon — write a new signed fact',
       description:
-        'Propose a new Canon fact (entity + claim + sourceRef + sourceExcerpt). ' +
-        'NOTE: not implemented in v0.1 — returns a stub message. ' +
-        'In v0.2 this will pipe through the same scan→sign→persist pipeline used by Slack/Gmail/PDF ingestion.',
+        '[CALL THIS to add a new fact to the Canon ledger from an agent or terminal session — ' +
+        'the equivalent of a manual UI write, but signed via the same pipeline.] ' +
+        'Pipes one draft through the shared scan→sign→persist pipeline used by Slack/Gmail/PDF ingestion. ' +
+        'Result: an Ed25519-signed FactEvent at the chain tip with status=active (or status=redacted if the ' +
+        'local PII/secret scanner flagged the content). Default sourceRef pattern is ' +
+        '"manual:agent-claude:<ISO>" so agent-driven writes are trivially identifiable. ' +
+        'PAIR THIS with the /canon-write skill for an interactive preview-then-confirm flow before signing. ' +
+        'Returns the factId + eventHash + parent (chain tip) — quote those back to the user verbatim.',
       inputSchema: {
-        entity: z.string().describe("Entity slug, e.g. 'acme'."),
-        claim: z.string().describe('One-sentence factual statement.'),
-        sourceRef: z.string().describe("Stable source pointer, e.g. 'manual:agent-claude:2026-04-25'."),
-        sourceExcerpt: z.string().describe('1–2 lines of original text for citation.'),
+        entity: z
+          .string()
+          .describe(
+            "Entity slug (lowercase, snake_case), e.g. 'miller_group', 'gonzalez_inc'. " +
+              'Lowercased automatically.',
+          ),
+        claim: z
+          .string()
+          .describe(
+            'One-sentence factual statement in natural language. ' +
+              'E.g. "Miller Group migrated to annual billing on 2026-04-20."',
+          ),
+        sourceRef: z
+          .string()
+          .optional()
+          .describe(
+            "Stable source pointer. Defaults to 'manual:agent-claude:<ISO>'. " +
+              "Override only if the agent has a stable external pointer (e.g. 'slack:C0..:ts').",
+          ),
+        sourceExcerpt: z
+          .string()
+          .describe(
+            '1–2 lines of original text the claim is grounded in. Shows up as the [excerpt] ' +
+              'line in canon_lookup output and is what the human will see as evidence.',
+          ),
+        metricKey: z
+          .string()
+          .optional()
+          .describe(
+            'Optional structured-metric key, e.g. "per_seat_price", "seat_count", "renewal_date". ' +
+              'Including this enables conflict-detection against existing facts on the same (entity, metricKey).',
+          ),
+        metricValue: z
+          .string()
+          .optional()
+          .describe('Optional metric value, e.g. "1999", "50", "2026-05-15". Required if metricKey is set.'),
+        metricUnit: z
+          .string()
+          .optional()
+          .describe('Optional metric unit, e.g. "EUR", "seats", "ISO-date".'),
+        workspace: z
+          .string()
+          .optional()
+          .describe('Workspace slug. Defaults to "inazuma".'),
       },
     },
-    async ({ entity, claim }) => canonWrite(entity, claim),
+    async (args) => canonWrite(args),
+  );
+
+  server.registerTool(
+    'canon_conflicts',
+    {
+      title: 'Canon — list pending conflicts (numbered picker)',
+      description:
+        '[CALL THIS to surface every open (entity, metric) conflict in the ledger as a numbered picker ' +
+        'the human can choose from in chat.] Returns a pre-formatted "[1] [2] [3]" list with sub-letters ' +
+        '"a/b/c" for each candidate value, including factIds + sources per cluster. ' +
+        'PAIR THIS with the /canon-resolve skill for the interactive checkbox-style pick flow. ' +
+        'IMPORTANT: present this list verbatim to the human and ASK them to pick — never auto-resolve. ' +
+        'Optional entity filter to narrow down ("/canon-resolve miller_group" use case).',
+      inputSchema: {
+        entity: z
+          .string()
+          .optional()
+          .describe(
+            'Optional entity slug filter. Omit to list ALL open conflicts. ' +
+              "Pass e.g. 'miller_group' to show only that entity's conflicts.",
+          ),
+        workspace: z.string().optional().describe('Workspace slug. Defaults to "inazuma".'),
+        limit: z
+          .number()
+          .optional()
+          .describe('Cap on returned conflict groups (1–100, default 25).'),
+      },
+    },
+    async ({ entity, workspace, limit }) => canonConflicts({ entity, workspace, limit }),
+  );
+
+  server.registerTool(
+    'canon_resolve',
+    {
+      title: 'Canon — sign a conflict resolution',
+      description:
+        '[CALL THIS only AFTER the human has explicitly picked a value or chosen "distinct".] ' +
+        'Signs a ResolutionEvent at the chain tip. Two modes: ' +
+        '"canonical" promotes one factId as truth and supersedes the others; ' +
+        '"distinct" records that the candidates are separate records (none gets superseded). ' +
+        'BIT-IDENTICAL to clicking "Sign as canonical →" in the AskCanon UI — same code path, same chain. ' +
+        'PAIR THIS with /canon-resolve skill for the picker UX. After signing, ALWAYS quote back the ' +
+        'resolutionFactId + eventHash + parentHash so the user sees the chain extension.',
+      inputSchema: {
+        mode: z
+          .enum(['canonical', 'distinct'])
+          .describe(
+            '"canonical" = pick one value as truth (winnerFactId required); ' +
+              '"distinct" = mark all candidates as separate records (candidateFactIds required).',
+          ),
+        entity: z.string().describe("Entity slug, e.g. 'miller_group'."),
+        metricKey: z
+          .string()
+          .describe('Metric key from canon_conflicts output, e.g. "per_seat_price".'),
+        winnerFactId: z
+          .string()
+          .optional()
+          .describe(
+            'For mode="canonical": the factId of the value to canonize. ' +
+              'Pick any factId from the chosen letter cluster in canon_conflicts output.',
+          ),
+        candidateFactIds: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'For mode="distinct": ALL factIds across ALL letters in the conflict group ' +
+              '(every fact you reviewed and confirmed as a separate record).',
+          ),
+      },
+    },
+    async ({ mode, entity, metricKey, winnerFactId, candidateFactIds }) => {
+      if (mode === 'canonical') {
+        if (!winnerFactId) return errorBlock('winnerFactId is required when mode="canonical"');
+        return canonResolve({ mode, entity, metricKey, winnerFactId });
+      }
+      if (!candidateFactIds || candidateFactIds.length < 2) {
+        return errorBlock('candidateFactIds (≥2) is required when mode="distinct"');
+      }
+      return canonResolve({ mode, entity, metricKey, candidateFactIds });
+    },
   );
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write('[canon-mcp] connected on stdio\n');
+  process.stderr.write('[canon-mcp] connected on stdio (v0.2.0 — write+conflicts+resolve)\n');
 }
 
 main().catch((e) => {
