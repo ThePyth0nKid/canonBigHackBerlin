@@ -304,7 +304,7 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
             <span className="font-mono">{card.authorityEmail}</span>
             {' · '}
             <a
-              href={`/app#${card.entity}`}
+              href={`/app?focus=${encodeURIComponent(card.entity)}#entity-${card.entity}`}
               className="text-sky-600 hover:underline dark:text-sky-400"
             >
               full ledger →

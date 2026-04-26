@@ -30,7 +30,11 @@ const FEATURED_SLUGS = [
   'northwind', 'acme', 'techco', 'globex', 'initech', 'umbrella', 'soylent',
 ];
 
-export default async function WorkspacePage() {
+interface WorkspacePageProps {
+  searchParams: Promise<{ focus?: string }>;
+}
+
+export default async function WorkspacePage({ searchParams }: WorkspacePageProps) {
   const session = await auth();
   if (!session?.user) redirect('/login');
   const userId = (session.user as { id?: string }).id;
@@ -38,6 +42,13 @@ export default async function WorkspacePage() {
 
   const activeWorkspace = 'inazuma';
   const wsMeta = WORKSPACES[0];
+  const params = await searchParams;
+  // /decide cards link here as `/app?focus=<slug>#entity-<slug>`. We force the
+  // focused slug into the initial featured render so non-featured entities
+  // (bright_plc, ellis_group, etc.) still appear above the fold for the
+  // browser's anchor-scroll. Without this they'd only show after a TailLoader
+  // click, and the deep-link would land on a blank /app.
+  const focusSlug = params.focus?.toLowerCase().replace(/[^a-z0-9_]/g, '') ?? null;
 
   return (
     <main className="flex flex-1 flex-col px-6 py-10">
@@ -102,7 +113,7 @@ export default async function WorkspacePage() {
         {/* Featured entities: ~7-14 entities, ~150 facts. Cheap query +
             cheap render. The long tail comes through TailLoader on demand. */}
         <Suspense fallback={<FeaturedSkeleton />}>
-          <FeaturedAndTail userId={userId} workspace={activeWorkspace} />
+          <FeaturedAndTail userId={userId} workspace={activeWorkspace} focusSlug={focusSlug} />
         </Suspense>
       </div>
     </main>
@@ -162,26 +173,39 @@ async function StatsRow({
 async function FeaturedAndTail({
   userId,
   workspace,
+  focusSlug,
 }: {
   userId: string;
   workspace: string;
+  focusSlug: string | null;
 }) {
+  // When deep-linked from /decide, prepend the focus slug to FEATURED so its
+  // EntitySection renders server-side (browser anchor-scrolls to its #id).
+  const slugsToFeature =
+    focusSlug && !FEATURED_SLUGS.includes(focusSlug)
+      ? [focusSlug, ...FEATURED_SLUGS]
+      : FEATURED_SLUGS;
+
   const [allSlugs, featured] = await Promise.all([
     loadEntitySlugsOrdered(userId, workspace),
-    loadEntitiesBySlugs(userId, workspace, FEATURED_SLUGS),
+    loadEntitiesBySlugs(userId, workspace, slugsToFeature),
   ]);
 
   if (allSlugs.length === 0) return <EmptyState />;
 
-  // The tail = everything not in the featured set, in canonical order.
-  const featuredSet = new Set(FEATURED_SLUGS);
+  const featuredSet = new Set(slugsToFeature);
   const tailSlugs = allSlugs.filter((s) => !featuredSet.has(s));
 
   return (
     <>
       <div className="mt-10 space-y-12">
         {featured.map((e, i) => (
-          <EntitySection key={e.slug} entity={e} primary={i === 0} />
+          <EntitySection
+            key={e.slug}
+            entity={e}
+            primary={i === 0}
+            focused={focusSlug === e.slug}
+          />
         ))}
       </div>
       <TailLoader workspace={workspace} tailSlugs={tailSlugs} />

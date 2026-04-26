@@ -16,12 +16,19 @@ import { SourcePill } from './source-pill';
 export function EntitySection({
   entity,
   primary,
+  focused,
 }: {
   entity: EntityGroup;
   primary?: boolean;
+  /** True when navigated to via /app?focus=<slug> — render with a highlighted
+   *  border so deep-link arrivals from /decide land on a visually-marked entity. */
+  focused?: boolean;
 }) {
   return (
-    <section>
+    <section
+      id={`entity-${entity.slug}`}
+      className={focused ? 'scroll-mt-8 rounded-2xl ring-2 ring-sky-400 ring-offset-4 ring-offset-zinc-50 dark:ring-offset-zinc-950' : 'scroll-mt-8'}
+    >
       <div className="flex items-baseline justify-between gap-3">
         {primary ? (
           <h2 className="text-xl font-semibold tracking-tight">
