@@ -44,7 +44,12 @@ Slack / Gmail / PDF / Qontext-dataset / …
    ▼              ▼
    MCP server  →  canon_workspaces · canon_lookup · canon_search ·
                   canon_cite · canon_diff · canon_external_lookup
-                  (Tavily, unsigned) · canon_write (v0.2)
+                  (Tavily, unsigned) · canon_write · canon_conflicts ·
+                  canon_resolve
+
+   .claude/skills/  →  /canon-write   (preview → click-confirm → sign)
+                       /canon-resolve (numbered picker → click → sign
+                                       ResolutionEvent on the chain)
 ```
 
 **Workspaces (federation):**
@@ -100,7 +105,7 @@ flight, 2 LOW transparently triaged).
 
 ## MCP integration
 
-Canon's MCP server exposes 6 tools to any MCP-compatible agent (Claude
+Canon's MCP server exposes 9 tools to any MCP-compatible agent (Claude
 Desktop, Claude Code, Cursor, Windsurf, Zed, …):
 
 | Tool                     | Purpose                                                  |
@@ -111,7 +116,9 @@ Desktop, Claude Code, Cursor, Windsurf, Zed, …):
 | `canon_cite`             | Full COSE_Sign1 audit-chain proof for one factId        |
 | `canon_diff`             | What changed for an entity since an ISO date             |
 | `canon_external_lookup`  | UNSIGNED Tavily web context, side-by-side with signed   |
-| `canon_write`            | Propose a new fact (stub — v0.2)                        |
+| `canon_write`            | Sign a new FactEvent through the shared scan→sign pipeline (`manual:agent-claude:<ISO>` source ref) |
+| `canon_conflicts`        | List open `(entity, metric)` conflicts as a numbered `[1] [2] [3]` picker with `a/b/c` value letters |
+| `canon_resolve`          | Sign a ResolutionEvent at the chain tip (`canonical` pick or `distinct` records) |
 
 Wire it up:
 
@@ -121,6 +128,31 @@ claude mcp add --scope user canon -- npx tsx /absolute/path/canon/mcp/canon-mcp.
 
 Or copy `mcp/claude-desktop-config.example.json` into
 `~/Library/Application Support/Claude/claude_desktop_config.json`.
+
+### Terminal-native skills (Claude Code)
+
+Two project-local skills under `.claude/skills/` wrap the write/conflicts/
+resolve tools in a click-pick UX using Claude Code's `AskUserQuestion`
+(no text-syntax to memorise — actual UI buttons in the terminal):
+
+- **`/canon-write`** — capture entity/claim/source in chat, render a preview
+  block, then a single 3-button question (Sign / Edit / Cancel). On
+  confirm, pipes through the shared sign-pipeline and quotes back the
+  signed `factId` + `eventHash` + `parentHash`.
+- **`/canon-resolve [entity?]`** — call `canon_conflicts`, render a
+  one-line overview, then `AskUserQuestion` with up to 4 questions
+  (one per conflict group), each offering the top 2 candidate values
+  plus *"Mark as distinct records"* and *"Skip for now"*. Each click
+  emits one signed ResolutionEvent on the chain. After all picks land,
+  re-runs `canon_conflicts` to show the conflict count drop.
+
+Both skills also trigger autonomously on natural-language phrasing (the
+description is "pushy"): saying *"fix the conflicts on Miller Group"*
+in chat invokes `/canon-resolve miller_group` without a slash-prefix.
+
+The MCP gives **capabilities**; the skills give **workflow**. One
+signed truth, three frontends — web-click, terminal-buttons, raw-MCP —
+all writing bit-identical events into the same hash chain.
 
 ## Architecture
 
