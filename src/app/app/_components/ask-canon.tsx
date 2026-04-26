@@ -498,10 +498,13 @@ function ExternalContextSection({ question }: { question: string }) {
         <button
           type="button"
           onClick={fetchTavily}
-          className="inline-flex items-center gap-1.5 rounded-full border border-sky-300 bg-white px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-wider text-sky-800 transition-colors hover:bg-sky-50 dark:border-sky-700/60 dark:bg-zinc-950 dark:text-sky-200 dark:hover:bg-sky-950/40"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl border-2 border-sky-400 bg-sky-50 px-4 py-3 text-sm font-semibold text-sky-900 shadow-sm transition-colors hover:bg-sky-100 hover:shadow dark:border-sky-500 dark:bg-sky-950/40 dark:text-sky-100 dark:hover:bg-sky-900/60"
         >
-          <span aria-hidden>⌕</span>
-          Search web for context (UNSIGNED)
+          <span aria-hidden className="text-lg">⌕</span>
+          <span>Compare with the public web</span>
+          <span className="rounded-full border border-sky-500 bg-sky-200 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-sky-900 dark:border-sky-400 dark:bg-sky-900/60 dark:text-sky-100">
+            UNSIGNED
+          </span>
           <span aria-hidden className="opacity-60">→</span>
         </button>
       </div>
