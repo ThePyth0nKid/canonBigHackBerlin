@@ -19,13 +19,25 @@
 import { useState, useTransition } from 'react';
 import { resolveConflict } from '../_actions/resolve';
 import { reverseResolution } from '../_actions/reverse-resolution';
+import { coSignResolution } from '../_actions/cosign-resolution';
 import type { ConflictCandidate, InlineConflict } from '@/lib/canon/ask';
 import { BrandChip, brandFor } from './ask-source-brand';
 import { useConfirmStep } from './use-confirm-step';
 import { ConfirmSignRow } from './confirm-sign-row';
+import { riskTier, tierExplain } from '@/lib/canon/risk-tier';
 
 type FightOutcome =
-  | { kind: 'canonical'; winnerFactId: string; superseded: number; resolutionFactId: string }
+  | {
+      kind: 'canonical';
+      winnerFactId: string;
+      superseded: number;
+      resolutionFactId: string;
+    }
+  | {
+      kind: 'pending';
+      winnerFactId: string;
+      resolutionFactId: string;
+    }
   | { kind: 'distinct'; resolutionFactId: string };
 
 const CANDIDATES_VISIBLE = 2;
@@ -54,6 +66,8 @@ export function AskFightCard({
   const hidden = conflict.candidates.length - visible.length;
   // Server supersedes every active competing fact except the winner.
   const otherActiveCount = Math.max(0, conflict.candidates.length - 1);
+  const tier = riskTier(conflict.metricKey);
+  const isHighRisk = tier === 'high';
 
   function pickCanonical(winnerFactId: string) {
     confirm.cancel();
@@ -72,12 +86,20 @@ export function AskFightCard({
           setPendingId(null);
           return;
         }
-        setOutcome({
-          kind: 'canonical',
-          winnerFactId,
-          superseded: r.superseded,
-          resolutionFactId: r.resolutionFactId ?? '',
-        });
+        if (r.pending) {
+          setOutcome({
+            kind: 'pending',
+            winnerFactId,
+            resolutionFactId: r.resolutionFactId ?? '',
+          });
+        } else {
+          setOutcome({
+            kind: 'canonical',
+            winnerFactId,
+            superseded: r.superseded,
+            resolutionFactId: r.resolutionFactId ?? '',
+          });
+        }
         setPendingId(null);
       } catch (e) {
         setError((e as Error).message ?? 'Resolve failed');
@@ -115,25 +137,33 @@ export function AskFightCard({
     });
   }
 
-  const winnerFactId = outcome?.kind === 'canonical' ? outcome.winnerFactId : null;
+  const winnerFactId =
+    outcome?.kind === 'canonical' || outcome?.kind === 'pending'
+      ? outcome.winnerFactId
+      : null;
   const resolved = !!outcome;
+  const pendingCosign = outcome?.kind === 'pending';
 
   return (
     <article
       id={`fight-${conflict.entity}-${conflict.metricKey}`}
       className={`scroll-mt-24 overflow-hidden rounded-2xl border bg-white shadow-sm transition-colors dark:bg-zinc-950 ${
-        resolved
-          ? 'border-emerald-300 dark:border-emerald-700/60'
-          : 'border-amber-300 dark:border-amber-700/60'
+        pendingCosign
+          ? 'border-violet-400 dark:border-violet-600/60'
+          : resolved
+            ? 'border-emerald-300 dark:border-emerald-700/60'
+            : 'border-amber-300 dark:border-amber-700/60'
       }`}
     >
       {/* HEADER — entity + metric + position in queue. Big enough that the
           user sees "what am I deciding here" before the candidates. */}
       <header
         className={`flex flex-wrap items-baseline justify-between gap-3 border-b px-4 py-3 ${
-          resolved
-            ? 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-800/50 dark:bg-emerald-950/30'
-            : 'border-amber-200 bg-amber-50/60 dark:border-amber-800/50 dark:bg-amber-950/20'
+          pendingCosign
+            ? 'border-violet-200 bg-violet-50/60 dark:border-violet-800/50 dark:bg-violet-950/30'
+            : resolved
+              ? 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-800/50 dark:bg-emerald-950/30'
+              : 'border-amber-200 bg-amber-50/60 dark:border-amber-800/50 dark:bg-amber-950/20'
         }`}
       >
         <div className="min-w-0 flex-1">
@@ -150,9 +180,20 @@ export function AskFightCard({
             {conflict.entityDisplay}
           </h3>
         </div>
-        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
-          {conflict.candidates.length} competing values
-        </span>
+        <div className="flex flex-col items-end gap-1">
+          {isHighRisk && !resolved && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full border border-violet-500 bg-violet-100 px-2 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-violet-900 dark:border-violet-400 dark:bg-violet-900/40 dark:text-violet-100"
+              title={tierExplain('high')}
+            >
+              <span aria-hidden>👁️👁️</span>
+              4-eyes required
+            </span>
+          )}
+          <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+            {conflict.candidates.length} competing values
+          </span>
+        </div>
       </header>
 
       {/* CANDIDATES — vertical stack so each row is a complete unit the
@@ -163,12 +204,18 @@ export function AskFightCard({
             key={cand.factId}
             cand={cand}
             isWinner={winnerFactId === cand.factId}
-            isLoser={!!winnerFactId && winnerFactId !== cand.factId}
+            isLoser={
+              outcome?.kind === 'canonical' && winnerFactId !== cand.factId
+            }
             isPending={pending && pendingId === cand.factId}
             disabled={pending || resolved}
             isArmed={confirm.isArmed(cand.factId)}
             isReady={confirm.isReady(cand.factId)}
-            consequence={`This becomes Source of Truth for ${conflict.entityDisplay} · ${conflict.metricKey}. ${otherActiveCount} other candidate${otherActiveCount === 1 ? '' : 's'} flip to superseded. Signed + permanent on the audit chain (admin reverse required to undo).`}
+            consequence={
+              isHighRisk
+                ? `4-eyes metric. Your pick is signed as resolution-PENDING; ${otherActiveCount} other candidate${otherActiveCount === 1 ? '' : 's'} stay active until a SECOND admin co-signs (then they flip to superseded).`
+                : `This becomes Source of Truth for ${conflict.entityDisplay} · ${conflict.metricKey}. ${otherActiveCount} other candidate${otherActiveCount === 1 ? '' : 's'} flip to superseded. Signed + permanent on the audit chain (admin reverse required to undo).`
+            }
             onArm={() => confirm.arm(cand.factId)}
             onConfirm={() => pickCanonical(cand.factId)}
             onCancel={confirm.cancel}
@@ -218,7 +265,26 @@ export function AskFightCard({
         </div>
       )}
 
-      {outcome && (
+      {outcome && outcome.kind === 'pending' && (
+        <PendingCosignFooter
+          outcome={outcome}
+          onCosigned={(supersededNow, cosignerEmail) => {
+            // Co-sign succeeded: pending → resolution, losers superseded.
+            // Promote the outcome to canonical so the visual state matches.
+            setOutcome({
+              kind: 'canonical',
+              winnerFactId: outcome.winnerFactId,
+              superseded: supersededNow,
+              resolutionFactId: outcome.resolutionFactId,
+            });
+            setReverseNote(
+              `✓ Co-signed by ${cosignerEmail} · ${supersededNow} fact${supersededNow === 1 ? '' : 's'} superseded`,
+            );
+          }}
+        />
+      )}
+
+      {outcome && outcome.kind !== 'pending' && (
         <SignedFooter
           outcome={outcome}
           onReversed={(reactivated) => {
@@ -481,6 +547,84 @@ function SignedFooter({
             </p>
           )}
         </div>
+      )}
+    </footer>
+  );
+}
+
+/**
+ * 4-eyes pending state. The proposal is signed and on the chain
+ * (status='resolution-pending') but no facts have been superseded
+ * yet — the losers stay 'active'. A SECOND admin must call
+ * coSignResolution() to make the supersedure apply.
+ *
+ * The cosign call is server-gated: requireAdmin + email !== initiator.
+ * Demo behaviour with a single user is honest — the button returns
+ * 'same-as-initiator' which we surface inline so the audience sees
+ * exactly what blocks the pick from taking effect.
+ */
+function PendingCosignFooter({
+  outcome,
+  onCosigned,
+}: {
+  outcome: { kind: 'pending'; winnerFactId: string; resolutionFactId: string };
+  onCosigned: (supersededNow: number, cosignerEmail: string) => void;
+}) {
+  const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  function submit() {
+    setError(null);
+    start(async () => {
+      try {
+        const r = await coSignResolution({
+          resolutionFactId: outcome.resolutionFactId,
+        });
+        if (!r.ok) {
+          setError(
+            r.error === 'admin-required'
+              ? 'Admin role required to co-sign.'
+              : r.error === 'same-as-initiator'
+                ? 'Co-sign refused — same email as the initiator. A SECOND admin must sign for high-risk picks.'
+                : r.error,
+          );
+          return;
+        }
+        onCosigned(r.superseded, r.cosignerEmail);
+      } catch (e) {
+        setError((e as Error).message ?? 'Co-sign failed');
+      }
+    });
+  }
+
+  return (
+    <footer className="border-t border-violet-200 bg-violet-50 px-4 py-3 dark:border-violet-800/50 dark:bg-violet-950/40">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[10px] font-semibold uppercase tracking-wider text-violet-900 dark:text-violet-200">
+            <span aria-hidden className="mr-1">👁️👁️</span>
+            awaiting 4-eyes co-sign
+          </p>
+          <p className="mt-0.5 text-[11px] leading-snug text-violet-900/80 dark:text-violet-100/80">
+            Pick is signed as resolution-PENDING (
+            <span className="font-mono">{outcome.resolutionFactId.slice(0, 14)}…</span>
+            ). Losers stay active; supersedure applies only after a SECOND
+            admin co-signs.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={submit}
+          disabled={pending}
+          className="inline-flex h-8 items-center justify-center rounded-full bg-violet-700 px-3 font-mono text-[10px] font-semibold uppercase tracking-wider text-white hover:bg-violet-800 disabled:bg-violet-400 dark:bg-violet-600 dark:hover:bg-violet-700"
+        >
+          {pending ? 'co-signing…' : 'co-sign · sign as canonical'}
+        </button>
+      </div>
+      {error && (
+        <p className="mt-2 font-mono text-[10px] text-rose-700 dark:text-rose-300">
+          {error}
+        </p>
       )}
     </footer>
   );

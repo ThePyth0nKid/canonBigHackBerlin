@@ -5,6 +5,7 @@ import { revalidatePath } from 'next/cache';
 import { prisma } from '@/lib/prisma';
 import { auth } from '@/auth';
 import { CanonSigner } from '@/lib/canon/sign';
+import { riskTier, type RiskTier } from '@/lib/canon/risk-tier';
 
 /**
  * User-pick conflict resolution.
@@ -24,6 +25,15 @@ import { CanonSigner } from '@/lib/canon/sign';
  * Both outcomes are signed events. Canon doesn't auto-merge identity —
  * it surfaces provenance and records the human's call.
  */
+export interface ResolveResult {
+  ok: boolean;
+  superseded: number;
+  resolutionFactId?: string;
+  tier?: RiskTier;
+  /** True for high-risk picks: written as 'resolution-pending' awaiting co-sign. */
+  pending?: boolean;
+}
+
 export async function resolveConflict(args:
   | {
       mode: 'canonical';
@@ -37,25 +47,29 @@ export async function resolveConflict(args:
       metricKey: string;
       candidateFactIds: string[];
     },
-): Promise<{ ok: boolean; superseded: number; resolutionFactId?: string }> {
+): Promise<ResolveResult> {
   const session = await auth();
   if (!session?.user) return { ok: false, superseded: 0 };
   const userId = (session.user as { id?: string }).id;
   if (!userId) return { ok: false, superseded: 0 };
+  const initiatorEmail = session.user.email ?? '';
 
   if (args.mode === 'canonical') {
-    return runCanonicalResolution({ ...args, userId });
+    return runCanonicalResolution({ ...args, userId, initiatorEmail });
   }
   return runDistinctRecords({ ...args, userId });
 }
 
 async function runCanonicalResolution(args: {
   userId: string;
+  initiatorEmail: string;
   entity: string;
   metricKey: string;
   winnerFactId: string;
-}): Promise<{ ok: boolean; superseded: number; resolutionFactId?: string }> {
-  const { userId } = args;
+}): Promise<ResolveResult> {
+  const { userId, initiatorEmail } = args;
+  const tier = riskTier(args.metricKey);
+  const fourEyes = tier === 'high';
   // Lookup the winner first — its workspace becomes the scope for everything
   // that follows. Without this scoping, picking ACME.seats=50 in Northwind
   // could accidentally supersede an unrelated huang_llc.industry fact in
@@ -97,7 +111,9 @@ async function runCanonicalResolution(args: {
   const signer = new CanonSigner();
   signer.start();
   const resolutionFactId = `f_res_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
-  const claim = `Resolution: ${args.entity}.${args.metricKey} = ${winner.metricValue ?? '(no value)'} (user pick over ${losers.length} alternative${losers.length === 1 ? '' : 's'}).`;
+  const claim = fourEyes
+    ? `Resolution-PENDING (4-eyes): ${args.entity}.${args.metricKey} = ${winner.metricValue ?? '(no value)'} — proposed pick over ${losers.length} alternative${losers.length === 1 ? '' : 's'}; awaiting second admin co-sign before supersedure applies.`
+    : `Resolution: ${args.entity}.${args.metricKey} = ${winner.metricValue ?? '(no value)'} (user pick over ${losers.length} alternative${losers.length === 1 ? '' : 's'}).`;
   const sourceRef = `resolution:user:${userId}`;
 
   let signRes;
@@ -113,6 +129,40 @@ async function runCanonicalResolution(args: {
     });
   } finally {
     await signer.close();
+  }
+
+  // High-risk path: write proposal as 'resolution-pending' and skip
+  // supersedure. Losers stay 'active' until coSignResolution() is
+  // called by a different admin — that flips status to 'resolution'
+  // and supersedes them in a single transaction. The pending event
+  // itself IS signed and on the chain, so even an un-cosigned
+  // proposal leaves a permanent audit trace.
+  if (fourEyes) {
+    await prisma.factEvent.create({
+      data: {
+        id: resolutionFactId,
+        userId,
+        workspace,
+        entity: args.entity,
+        claim,
+        metricKey: args.metricKey,
+        metricValue: winner.metricValue ?? null,
+        metricUnit: winner.metricUnit ?? null,
+        sourceRef,
+        sourceExcerpt: claim,
+        parentHash: parentHash || null,
+        eventHash: signRes.eventHash,
+        coseSign1Hex: signRes.coseSign1Hex,
+        signerPubkey: signRes.signerPubkey,
+        signedAt: new Date(signRes.signedAtMs),
+        observedAt: new Date(),
+        status: 'resolution-pending',
+        notes: `pending:awaiting-cosign:tier=high:initiator=${initiatorEmail || userId}:winner=${args.winnerFactId}:losers=${losers.map((l) => l.id).join(',')}`,
+      },
+    });
+
+    revalidatePath('/app');
+    return { ok: true, superseded: 0, resolutionFactId, tier, pending: true };
   }
 
   await prisma.$transaction([
@@ -149,7 +199,7 @@ async function runCanonicalResolution(args: {
 
   revalidatePath('/app');
   revalidatePath('/decide');
-  return { ok: true, superseded: losers.length, resolutionFactId };
+  return { ok: true, superseded: losers.length, resolutionFactId, tier };
 }
 
 async function runDistinctRecords(args: {

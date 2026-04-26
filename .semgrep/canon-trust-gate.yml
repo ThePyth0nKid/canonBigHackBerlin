@@ -56,6 +56,13 @@ rules:
         # (see src/lib/canon/sign-js.ts:7-14) — lifecycle metadata is
         # mutable by design.
         - /src/app/app/_actions/resolve.ts
+        # Admin reverse of a resolution. Signs a NEW event via
+        # CanonSigner and flips superseded losers back to active. The
+        # signing call is the trust boundary, exactly like resolve.ts.
+        - /src/app/app/_actions/reverse-resolution.ts
+        # 4-eyes co-sign of a high-risk resolution-pending row. Same
+        # CanonSigner path; admin gate enforces email != initiator.
+        - /src/app/app/_actions/cosign-resolution.ts
         # Corroboration sweep flips losers' `status` to `superseded`.
         # Same payload-coverage argument as resolve.ts.
         - /src/lib/canon/conflicts.ts
@@ -116,6 +123,8 @@ rules:
         - /src/lib/canon/pipeline.ts
         - /src/app/api/sync/route.ts
         - /src/app/app/_actions/resolve.ts
+        - /src/app/app/_actions/reverse-resolution.ts
+        - /src/app/app/_actions/cosign-resolution.ts
         - /src/lib/canon/conflicts.ts
         - /scripts/**
         - /src/generated/**
@@ -154,6 +163,8 @@ rules:
         - /src/lib/canon/pipeline.ts
         - /src/app/api/sync/route.ts
         - /src/app/app/_actions/resolve.ts
+        - /src/app/app/_actions/reverse-resolution.ts
+        - /src/app/app/_actions/cosign-resolution.ts
         - /src/lib/canon/conflicts.ts
         - /scripts/**
         - /src/generated/**
