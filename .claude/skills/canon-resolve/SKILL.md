@@ -1,12 +1,12 @@
 ---
 name: canon-resolve
-description: Use this skill whenever the user wants to resolve, fix, pick, or review open conflicts in the Canon ledger from the terminal — phrases like "resolve canon conflicts", "fix the conflicts", "what conflicts are open", "pick the truth", "/canon-resolve", "show me the open ones", or any time the user mentions reviewing competing claims and choosing the canonical value. Optional argument is an entity slug to scope (e.g. "/canon-resolve miller_group"). Renders a numbered checkbox-style picker; NEVER auto-resolves — every pick must be explicit.
+description: Use this skill whenever the user wants to resolve, fix, pick, or review open conflicts in the Canon ledger from the terminal — phrases like "resolve canon conflicts", "fix the conflicts", "what conflicts are open", "pick the truth", "/canon-resolve", "show me the open ones", or any time the user mentions reviewing competing claims and choosing the canonical value. Optional argument is an entity slug to scope (e.g. "/canon-resolve miller_group"). Renders proper UI buttons via AskUserQuestion (NOT text-parsing). Never auto-resolves.
 ---
 
-# /canon-resolve — interactive conflict picker (terminal-native)
+# /canon-resolve — interactive conflict picker with real UI buttons
 
 Capability layer: `canon_conflicts` + `canon_resolve` MCP tools.
-This skill: the human-in-the-loop checkbox-style picker UX around them.
+This skill: drives a click-pick UX using `AskUserQuestion` (no text-replies to parse).
 
 ## When to invoke
 
@@ -24,88 +24,93 @@ If the user passed an entity slug (e.g. `/canon-resolve miller_group`), pass it 
 
 Args: `{ entity?, workspace?, limit? }`. Defaults: workspace=inazuma, limit=25.
 
-The tool already returns a pre-formatted picker with `[1] [2] [3]` group numbers and `a) b) c)` value letters per group, plus the factIds for each cluster. **Do not re-format it** — render verbatim.
+The tool returns numbered groups `[1] [2] [3]` with letter-coded values `a/b/c` and factIds.
 
-### Step 3 — Render the picker + reply-format hint
+### Step 3 — Show the user a brief overview (1-2 sentences max)
 
-Show the tool's output as-is, then append the interaction prompt:
+Don't dump the whole tool output as text — the picker UI in the next step will surface each conflict cleanly. Just say e.g.:
+
+> *Found 3 open conflicts on miller_group. Pick canonical value, mark as distinct, or skip for each:*
+
+Then immediately go to Step 4. Avoid re-rendering the full picker as markdown since `AskUserQuestion` will display them as proper UI cards.
+
+### Step 4 — Use `AskUserQuestion` for batch selection (THE KEY STEP)
+
+This is what makes the UX feel native. Build ONE `AskUserQuestion` call with up to 4 questions (one per conflict group). For each conflict group, build a question like this:
 
 ```
-Reply with picks. Format:
-  <#>:<letter>      e.g.  "1:a"        → sign letter-a as canonical for group #1
-  <#>:distinct                           → mark all values in group #1 as separate records
-  <#>:skip                               → leave group #1 open
-  multiple OK:      "1:a, 2:distinct, 3:skip"
-  shorthand:        "all canonical:a"   → pick letter-a for every group (use carefully)
-
-Awaiting your choice…
+question: "Pick the canonical value for <entity> · <metricKey>"
+header:   "<short-label>"      // ≤12 chars, e.g. "miller·price"
+multiSelect: false
+options: [
+  // Top 2-3 values become options (label = the displayValue from the picker)
+  { label: "<value-a>",  description: "<N> fact(s) · sources: <kinds>" },
+  { label: "<value-b>",  description: "<N> fact(s) · sources: <kinds>" },
+  { label: "Mark as distinct records", description: "All values stay active — signed acknowledgement that they are independent records" },
+  { label: "Skip for now",             description: "Leave this conflict open" },
+]
 ```
 
-### Step 4 — Wait for the human reply, parse, validate
+Constraints baked in by AskUserQuestion:
+- 1-4 questions per call → batch up to 4 conflict groups per round
+- 2-4 options per question → if a group has >2 values, include the top 2 by fact-count + "Mark as distinct" + "Skip" (the user can still see all values in the canon_conflicts overview if needed; for a 4+ value group, mention this in the question text and tell the user to use "Other" to free-type a letter like "c" or "d" if they want a value that's not in the top 2)
+- "Other" is auto-added by the runtime — no need to include it manually
+- Header MUST be ≤12 chars — use abbreviations like `miller·pric`, `gonz·renew`, `g1`, `g2` if needed
 
-Parse the reply into a list of `{ group: number, action: 'canonical'|'distinct'|'skip', letter?: string }` ops.
+### Step 5 — Map each answer to a `canon_resolve` call
 
-Validate:
-- Each `<#>` must be in range of the rendered groups
-- Each `<letter>` must exist in that group's value list
-- For `distinct` mode, the group must have ≥2 candidates (always true for shown conflicts, but double-check)
+The user's selection comes back as `answers[<question-text>] = <chosen-label>`. For each question:
 
-If anything is ambiguous or invalid, ask before dispatching — never guess.
+- **Selected value label** (e.g. "€2,200/year"): call `canon_resolve` with
+  - `mode: "canonical"`
+  - `entity`, `metricKey` from the conflict group
+  - `winnerFactId`: any factId from that letter's factIds array (in canon_conflicts output)
 
-### Step 5 — Dispatch one `canon_resolve` call per pick
+- **"Mark as distinct records"**: call `canon_resolve` with
+  - `mode: "distinct"`
+  - `entity`, `metricKey` from the conflict group
+  - `candidateFactIds`: ALL factIds across ALL letters in the group
 
-For each parsed op:
+- **"Skip for now"**: no tool call. Note in summary.
 
-- **`<#>:<letter>`** (canonical pick):
-  - `mode: 'canonical'`
-  - `entity`, `metricKey` from the group
-  - `winnerFactId`: pick ANY one factId from that letter's cluster (the picker output lists them)
+- **"Other"** (free text): try to interpret literally — if user typed "skip" → skip, "distinct" → distinct, a letter like "c" → canonical for that letter, otherwise ask a clarifying question.
 
-- **`<#>:distinct`** (separate records):
-  - `mode: 'distinct'`
-  - `entity`, `metricKey` from the group
-  - `candidateFactIds`: **ALL factIds across ALL letters** in the group (every fact the human just confirmed as a distinct record)
-
-- **`<#>:skip`**: no tool call. Note "skipped" in the summary.
-
-Make these calls **sequentially**, not in parallel — each call appends to the same hash chain and the parentHash needs the previous tip.
+Sequential calls — never parallel — because each `canon_resolve` extends the same hash chain and parentHash needs the previous tip.
 
 ### Step 6 — Summarize results
 
-Show a compact result table with the resolutionFactId + eventHash per pick:
+Compact result table after all signs land. Quote `resolutionFactId` + `eventHash` per pick — they are the cryptographic proof:
 
 ```
-✓ Resolved 2 of 3 conflicts:
+✓ Resolved 2 of 3:
 
-  [1] miller_group · per_seat_price → canonical (€1999)
-      resolution: f_res_a3b1…   event: 8f3e2a1d…   superseded: 2 facts
-
-  [2] miller_group · seat_count    → distinct (3 records)
-      resolution: f_dist_c91…   event: 4b9c7e8f…   superseded: 0 facts
-
-  [3] gonzalez_inc · renewal_date  → skipped (still open)
+  miller·price    → canonical (€1,999)        f_res_a3b1…  event 8f3e2a1d…
+  miller·poc      → distinct (3 records)      f_dist_c91…  event 4b9c7e8f…
+  gonzalez·renew  → skipped (still open)
 ```
 
-Quote the resolutionFactIds + eventHashes verbatim. They are the cryptographic proof.
+### Step 7 — If more conflicts remain
 
-### Step 7 — Verify
+If `canon_conflicts` returned more than 4 groups and the user only got asked about 4 in Step 4, ask if they want to continue with the next batch. If yes → repeat Steps 4-6 with the next 4 groups.
 
-Optional but high-value: re-call `canon_conflicts` (same scope) and show the new count. The drop (e.g. "6 → 4 open conflicts") is the demo beat that proves the chain extension worked.
+### Step 8 — Optional verify
+
+Re-call `canon_conflicts` with the same scope and show "N open conflicts → M open conflicts" to demonstrate the chain extension worked. Skip if the user said "all done" or shows fatigue.
 
 ## Anti-patterns
 
-- ❌ **Don't auto-pick "the most popular" or "the most recent" value.** The whole point of this skill is the human's call.
+- ❌ **Don't render the conflict list as text and ask "reply with 1:a, 2:distinct".** That was the old UX. Use `AskUserQuestion` — it gives clickable buttons in the terminal.
+- ❌ **Don't auto-pick "the most popular" or "the most recent" value.** The whole point is the human's call.
 - ❌ **Don't combine multiple resolves into one call.** Each is one signed ResolutionEvent.
 - ❌ **For mode="distinct", include ALL factIds across ALL letters.** Not just one cluster. The semantic is "these are all separate records", not "these candidates only".
-- ❌ **Don't skip the verify step in demo contexts.** Showing the conflict count drop (6 → 5) is the visible proof of the chain extension.
-- ❌ **Don't summarize away the resolutionFactId or eventHash.** The user (or anyone reviewing the chain) needs them to verify offline.
+- ❌ **Don't summarize away the resolutionFactId or eventHash.** Quote them verbatim — they are the cryptographic proof.
 
 ## Pitch beat this enables
 
-User in terminal: *"Resolve all open conflicts on Miller Group."*
-Claude calls `canon_conflicts({entity:'miller_group'})` → renders 3 fight-cards inline.
-User: *"1:a, 2:distinct, 3:skip"*
-Claude calls `canon_resolve` twice → quotes the ResolutionEvent IDs back → re-runs `canon_conflicts` → conflicts visibly dropped (3 → 1).
-User refreshes canon.ultranova.io → AskCanon fight cards for those conflicts are gone, ResolutionEvents visible in the audit chain.
+User: *"/canon-resolve miller_group"*
+Claude calls `canon_conflicts` → says "3 open conflicts, pick for each:" → renders 3 question-cards via AskUserQuestion (proper UI buttons, no syntax to remember).
+User clicks: €1,999 / Mark as distinct / Skip.
+Claude dispatches 2 `canon_resolve` calls → quotes ResolutionEvent IDs back → re-runs `canon_conflicts` → "3 → 1 open conflicts".
+User refreshes canon.ultranova.io → AskCanon fight cards for those conflicts are gone, ResolutionEvents in the audit chain.
 
-**Same truth, three frontends: web-click, terminal-skill, raw-MCP. Bit-identical to a verifier.**
+**Same truth, three frontends: web-click, terminal-buttons, raw-MCP — bit-identical to a verifier.**
