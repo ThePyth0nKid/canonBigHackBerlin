@@ -222,7 +222,13 @@ function AnswerBlock({ answer, question }: { answer: CanonAnswer; question: stri
         </p>
       )}
 
-      {/* ZONE 4 — provenance. Only when not double-covered by fight cards. */}
+      {/* ZONE 4 — UNSIGNED public-web context. Sits right after the
+          answer/conflict content so the user always reaches it even when
+          fight cards push the rest of the page far down. Trust gradient
+          made explicit; every Tavily item carries an unsigned badge. */}
+      <ExternalContextSection question={question} />
+
+      {/* ZONE 5 — provenance. Only when not double-covered by fight cards. */}
       {showCitationList && (
         <section>
           <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-500">
@@ -235,12 +241,6 @@ function AnswerBlock({ answer, question }: { answer: CanonAnswer; question: stri
           </div>
         </section>
       )}
-
-      {/* ZONE 5 — UNSIGNED public-web context. User-triggered. Trust gradient
-          made explicit — sky-blue card under the signed answer, every Tavily
-          item carries an unsigned badge. Closes the "I cannot answer" hole
-          without polluting the signed ledger or the trust narrative. */}
-      <ExternalContextSection question={question} />
     </div>
   );
 }
