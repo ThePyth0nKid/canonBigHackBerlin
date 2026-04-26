@@ -6,6 +6,8 @@ import { SourcePill } from './source-pill';
 import { resolveConflict } from '../_actions/resolve';
 import { summarizeConflictAction } from '../_actions/summarize-conflict';
 import type { ConflictSummary } from '@/lib/canon/conflict-summary';
+import { useConfirmStep } from './use-confirm-step';
+import { ConfirmSignRow } from './confirm-sign-row';
 
 interface Props {
   entity: string;
@@ -31,6 +33,7 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
   const [open, setOpen] = useState(false);
   const [pending, start] = useTransition();
   const [picked, setPicked] = useState<string | null>(null);
+  const confirm = useConfirmStep(1500);
 
   // Gemini summary state — separate from the resolve transition because
   // we don't want a long Gemini call to grey out the action buttons.
@@ -50,6 +53,48 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
   // For "distinct" mode we want every visible candidate's id, not just the
   // cluster heads — that way the signed event references all reviewed records.
   const allCandidateFactIds = clusters.flatMap((c) => c.map((f) => f.id));
+
+  // Server supersedes ALL active competing facts except the winner — so the
+  // count includes mates of the winning cluster (same value, multiple sources).
+  const otherActiveCount = Math.max(0, competing.length - 1);
+
+  function runCanonical(factId: string) {
+    confirm.cancel();
+    setPicked(factId);
+    start(async () => {
+      try {
+        await resolveConflict({
+          mode: 'canonical',
+          entity,
+          metricKey,
+          winnerFactId: factId,
+        });
+        setOpen(false);
+      } catch (e) {
+        setPicked(null);
+        console.error('[conflict-resolve:canonical]', e);
+      }
+    });
+  }
+
+  function runDistinct() {
+    confirm.cancel();
+    setPicked('__distinct__');
+    start(async () => {
+      try {
+        await resolveConflict({
+          mode: 'distinct',
+          entity,
+          metricKey,
+          candidateFactIds: allCandidateFactIds,
+        });
+        setOpen(false);
+      } catch (e) {
+        setPicked(null);
+        console.error('[conflict-resolve:distinct]', e);
+      }
+    });
+  }
 
   return (
     <>
@@ -164,41 +209,13 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
                 <SummaryCard
                   summary={summary}
                   competing={competing}
-                  onPickWinner={(factId) => {
-                    setPicked(factId);
-                    start(async () => {
-                      try {
-                        await resolveConflict({
-                          mode: 'canonical',
-                          entity,
-                          metricKey,
-                          winnerFactId: factId,
-                        });
-                        setOpen(false);
-                      } catch (e) {
-                        setPicked(null);
-                        console.error('[conflict-resolve:summary-pick]', e);
-                      }
-                    });
-                  }}
-                  onMarkDistinct={() => {
-                    setPicked('__distinct__');
-                    start(async () => {
-                      try {
-                        await resolveConflict({
-                          mode: 'distinct',
-                          entity,
-                          metricKey,
-                          candidateFactIds: allCandidateFactIds,
-                        });
-                        setOpen(false);
-                      } catch (e) {
-                        setPicked(null);
-                        console.error('[conflict-resolve:summary-distinct]', e);
-                      }
-                    });
-                  }}
+                  otherActiveCount={otherActiveCount}
+                  distinctCount={allCandidateFactIds.length}
+                  onPickWinner={runCanonical}
+                  onMarkDistinct={runDistinct}
                   pending={pending}
+                  picked={picked}
+                  confirm={confirm}
                 />
               )}
             </div>
@@ -275,30 +292,26 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
                       </p>
                     </details>
 
-                    <button
-                      type="button"
-                      disabled={pending}
-                      onClick={() => {
-                        setPicked(head.id);
-                        start(async () => {
-                          try {
-                            await resolveConflict({
-                              mode: 'canonical',
-                              entity,
-                              metricKey,
-                              winnerFactId: head.id,
-                            });
-                            setOpen(false);
-                          } catch (e) {
-                            setPicked(null);
-                            console.error('[conflict-resolve]', e);
-                          }
-                        });
-                      }}
-                      className="mt-auto inline-flex h-9 items-center justify-center rounded-full bg-zinc-950 px-4 text-xs font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
-                    >
-                      {pending && picked === head.id ? 'signing…' : 'Sign as canonical'}
-                    </button>
+                    {confirm.isArmed(head.id) ? (
+                      <div className="mt-auto">
+                        <ConfirmSignRow
+                          consequence={`This becomes Source of Truth. ${otherActiveCount} other active fact${otherActiveCount === 1 ? '' : 's'} will flip to superseded. Signed + permanent on the audit chain (admin reverse required to undo).`}
+                          ready={confirm.isReady(head.id)}
+                          pending={pending && picked === head.id}
+                          onConfirm={() => runCanonical(head.id)}
+                          onCancel={confirm.cancel}
+                        />
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={pending}
+                        onClick={() => confirm.arm(head.id)}
+                        className="mt-auto inline-flex h-9 items-center justify-center rounded-full bg-zinc-950 px-4 text-xs font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+                      >
+                        Sign as canonical
+                      </button>
+                    )}
                   </div>
                 );
               })}
@@ -317,32 +330,27 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
                   superseded.
                 </p>
               </div>
-              <button
-                type="button"
-                disabled={pending}
-                onClick={() => {
-                  setPicked('__distinct__');
-                  start(async () => {
-                    try {
-                      await resolveConflict({
-                        mode: 'distinct',
-                        entity,
-                        metricKey,
-                        candidateFactIds: allCandidateFactIds,
-                      });
-                      setOpen(false);
-                    } catch (e) {
-                      setPicked(null);
-                      console.error('[conflict-resolve:distinct]', e);
-                    }
-                  });
-                }}
-                className="inline-flex h-9 shrink-0 items-center justify-center rounded-full border border-sky-700 bg-sky-100 px-4 text-xs font-medium text-sky-900 transition-colors hover:bg-sky-200 disabled:opacity-60 dark:border-sky-500 dark:bg-sky-900/40 dark:text-sky-100 dark:hover:bg-sky-900/70"
-              >
-                {pending && picked === '__distinct__'
-                  ? 'signing…'
-                  : 'Keep all · sign as distinct'}
-              </button>
+              {confirm.isArmed('__distinct__') ? (
+                <div className="w-full sm:w-auto sm:min-w-[20rem]">
+                  <ConfirmSignRow
+                    consequence={`Sign acknowledgement that ${allCandidateFactIds.length} candidate fact${allCandidateFactIds.length === 1 ? '' : 's'} are independent records (none gets superseded). Signed + permanent on the audit chain.`}
+                    ready={confirm.isReady('__distinct__')}
+                    pending={pending && picked === '__distinct__'}
+                    onConfirm={runDistinct}
+                    onCancel={confirm.cancel}
+                    variant="distinct"
+                  />
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  disabled={pending}
+                  onClick={() => confirm.arm('__distinct__')}
+                  className="inline-flex h-9 shrink-0 items-center justify-center rounded-full border border-sky-700 bg-sky-100 px-4 text-xs font-medium text-sky-900 transition-colors hover:bg-sky-200 disabled:opacity-60 dark:border-sky-500 dark:bg-sky-900/40 dark:text-sky-100 dark:hover:bg-sky-900/70"
+                >
+                  Keep all · sign as distinct
+                </button>
+              )}
             </div>
 
             {overflow > 0 && (
@@ -365,15 +373,23 @@ export function ConflictResolve({ entity, metricKey, competing }: Props) {
 function SummaryCard({
   summary,
   competing,
+  otherActiveCount,
+  distinctCount,
   onPickWinner,
   onMarkDistinct,
   pending,
+  picked,
+  confirm,
 }: {
   summary: ConflictSummary;
   competing: FactRow[];
+  otherActiveCount: number;
+  distinctCount: number;
   onPickWinner: (factId: string) => void;
   onMarkDistinct: () => void;
   pending: boolean;
+  picked: string | null;
+  confirm: ReturnType<typeof useConfirmStep>;
 }) {
   const winner = summary.winnerFactId
     ? competing.find((f) => f.id === summary.winnerFactId)
@@ -406,40 +422,66 @@ function SummaryCard({
         </p>
       )}
       {winner && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-white/60 p-3 dark:bg-black/30">
-          <div className="min-w-0 flex-1">
-            <p className="font-mono text-[10px] uppercase tracking-wider text-violet-600 dark:text-violet-300">
-              Gemini's pick
-            </p>
-            <p className="mt-0.5 break-words text-sm font-medium text-zinc-900 dark:text-zinc-100">
-              {winner.metricValue ?? '—'}
-              {winner.metricUnit ? ` ${winner.metricUnit}` : ''}
-            </p>
-            <p className="mt-0.5 break-all font-mono text-[10px] text-zinc-500">
-              factId: {winner.id}
-            </p>
+        <div className="rounded-lg bg-white/60 p-3 dark:bg-black/30">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="font-mono text-[10px] uppercase tracking-wider text-violet-600 dark:text-violet-300">
+                Gemini's pick
+              </p>
+              <p className="mt-0.5 break-words text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                {winner.metricValue ?? '—'}
+                {winner.metricUnit ? ` ${winner.metricUnit}` : ''}
+              </p>
+              <p className="mt-0.5 break-all font-mono text-[10px] text-zinc-500">
+                factId: {winner.id}
+              </p>
+            </div>
+            {!confirm.isArmed(winner.id) && (
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() => confirm.arm(winner.id)}
+                className="inline-flex h-8 shrink-0 items-center justify-center rounded-full bg-zinc-950 px-3 text-[11px] font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+              >
+                Sign as canonical
+              </button>
+            )}
           </div>
-          <button
-            type="button"
-            disabled={pending}
-            onClick={() => onPickWinner(winner.id)}
-            className="inline-flex h-8 shrink-0 items-center justify-center rounded-full bg-zinc-950 px-3 text-[11px] font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
-          >
-            {pending ? 'signing…' : 'Sign as canonical'}
-          </button>
+          {confirm.isArmed(winner.id) && (
+            <div className="mt-2">
+              <ConfirmSignRow
+                consequence={`This becomes Source of Truth. ${otherActiveCount} other active fact${otherActiveCount === 1 ? '' : 's'} will flip to superseded. Signed + permanent on the audit chain (admin reverse required to undo).`}
+                ready={confirm.isReady(winner.id)}
+                pending={pending && picked === winner.id}
+                onConfirm={() => onPickWinner(winner.id)}
+                onCancel={confirm.cancel}
+              />
+            </div>
+          )}
         </div>
       )}
       {summary.recommendation === 'distinct' && (
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <button
-            type="button"
-            disabled={pending}
-            onClick={onMarkDistinct}
-            className="inline-flex h-8 items-center justify-center rounded-full border border-sky-700 bg-sky-100 px-3 text-[11px] font-medium text-sky-900 transition-colors hover:bg-sky-200 disabled:opacity-60 dark:border-sky-500 dark:bg-sky-900/40 dark:text-sky-100 dark:hover:bg-sky-900/70"
-          >
-            {pending ? 'signing…' : 'Keep all · sign as distinct'}
-          </button>
-        </div>
+        confirm.isArmed('__distinct__') ? (
+          <ConfirmSignRow
+            consequence={`Sign acknowledgement that ${distinctCount} candidate fact${distinctCount === 1 ? '' : 's'} are independent records (none gets superseded). Signed + permanent on the audit chain.`}
+            ready={confirm.isReady('__distinct__')}
+            pending={pending && picked === '__distinct__'}
+            onConfirm={onMarkDistinct}
+            onCancel={confirm.cancel}
+            variant="distinct"
+          />
+        ) : (
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => confirm.arm('__distinct__')}
+              className="inline-flex h-8 items-center justify-center rounded-full border border-sky-700 bg-sky-100 px-3 text-[11px] font-medium text-sky-900 transition-colors hover:bg-sky-200 disabled:opacity-60 dark:border-sky-500 dark:bg-sky-900/40 dark:text-sky-100 dark:hover:bg-sky-900/70"
+            >
+              Keep all · sign as distinct
+            </button>
+          </div>
+        )
       )}
     </div>
   );
