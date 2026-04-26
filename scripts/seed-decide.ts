@@ -101,12 +101,43 @@ const SCENARIOS: { label: string; facts: SeedFact[] }[] = [
   },
 ];
 
+/**
+ * Demo personas — real Prisma User rows for the source-authors. Their emails
+ * are RFC 6761 reserved (.example) so no real Google account can ever
+ * collide via NextAuth's link-by-email path. Used as targets for /decide
+ * persona attribution and for plus-addressed Resend magic-links.
+ */
+const PERSONAS: { email: string; name: string }[] = [
+  { email: 'alice@inazuma.example', name: 'Alice Tan · Sales Ops' },
+  { email: 'bob@inazuma.example', name: 'Bob Reyes · Customer Success' },
+  { email: 'lina@inazuma.example', name: 'Lina Hofer · Head of Sales' },
+  { email: 'greg@inazuma.example', name: 'Greg Mueller · Account Lead' },
+];
+
+async function upsertPersonas(): Promise<void> {
+  for (const p of PERSONAS) {
+    await prisma.user.upsert({
+      where: { email: p.email },
+      create: { email: p.email, name: p.name, emailVerified: null },
+      update: { name: p.name },
+    });
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
   const ownerArg = args.find((a) => a.startsWith('--owner='))?.split('=')[1];
   const ownerEmail = ownerArg ?? 'nelson@ultranova.io';
   const workspace = 'inazuma';
+
+  if (!dryRun) {
+    await upsertPersonas();
+    console.log(`[seed-decide] upserted ${PERSONAS.length} persona User rows`);
+  } else {
+    console.log(`[seed-decide] would upsert ${PERSONAS.length} personas:`);
+    for (const p of PERSONAS) console.log(`  - ${p.email}  (${p.name})`);
+  }
 
   const owner = await prisma.user.findUnique({ where: { email: ownerEmail } });
   if (!owner) {

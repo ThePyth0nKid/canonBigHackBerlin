@@ -2,10 +2,20 @@ import { auth, signOut } from '@/auth';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { loadDecisionInbox, loadOpenAuthorAsks } from '@/lib/canon/decide-view';
+import { verifyMagicToken } from '@/lib/canon/decide-mail';
 import { DecisionCard } from './_components/decision-card';
 import { AuthorResponsePanel } from './_components/author-response-panel';
 
 export const dynamic = 'force-dynamic';
+
+interface PageProps {
+  searchParams: Promise<{
+    thread?: string;
+    as?: string;
+    exp?: string;
+    sig?: string;
+  }>;
+}
 
 /**
  * Customer / decision-maker view.
@@ -14,13 +24,36 @@ export const dynamic = 'force-dynamic';
  * surface: only the conflicts that need a human, plus the "asked of you"
  * inbox if the signed-in user is an addressee. No ingest controls, no
  * full ledger, no proof modal — those live in /app.
+ *
+ * Magic-link landing: when ?thread=&as=&exp=&sig= is present, the HMAC
+ * is verified against MAGIC_LINK_SECRET. On valid tokens, the
+ * AuthorResponsePanel locks to the persona and surfaces the matching
+ * thread up top — one-click respond. On invalid/expired tokens, the
+ * page renders normally (no error, no auth side-effect).
  */
-export default async function DecidePage() {
+export default async function DecidePage({ searchParams }: PageProps) {
   const session = await auth();
   if (!session?.user) redirect('/login');
   const userId = (session.user as { id?: string }).id;
   const email = (session.user as { email?: string | null }).email ?? null;
   if (!userId) redirect('/login');
+
+  const params = await searchParams;
+  const verifyResult =
+    params.thread || params.as || params.sig || params.exp
+      ? verifyMagicToken({
+          thread: params.thread ?? null,
+          as: params.as ?? null,
+          exp: params.exp ?? null,
+          sig: params.sig ?? null,
+        })
+      : null;
+  const prefilledRespondingAs =
+    verifyResult && verifyResult.ok ? verifyResult.as : null;
+  const focusThreadId =
+    verifyResult && verifyResult.ok ? verifyResult.threadId : null;
+  const tokenError =
+    verifyResult && !verifyResult.ok ? verifyResult.reason : null;
 
   const inbox = await loadDecisionInbox(userId, 'inazuma', email);
   const openAsks = await loadOpenAuthorAsks(userId, 'inazuma');
@@ -71,9 +104,34 @@ export default async function DecidePage() {
           </p>
         </header>
 
+        {prefilledRespondingAs && (
+          <div className="mb-4 rounded-xl border-2 border-sky-400 bg-sky-50 p-4 dark:border-sky-700 dark:bg-sky-950/50">
+            <p className="text-[10px] font-mono uppercase tracking-wide text-sky-600 dark:text-sky-400">
+              Magic-link verified
+            </p>
+            <p className="mt-1 text-sm font-semibold text-sky-900 dark:text-sky-100">
+              Acting as <span className="font-mono">{prefilledRespondingAs}</span>
+            </p>
+            <p className="mt-1 text-[11px] text-sky-700 dark:text-sky-300">
+              You arrived from an email asking your input on a Canon conflict.
+              Your response will be signed and added to the hash-chained ledger.
+            </p>
+          </div>
+        )}
+        {tokenError && (
+          <div className="mb-4 rounded-xl border border-rose-300 bg-rose-50 p-3 text-[12px] text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300">
+            Magic-link {tokenError === 'expired' ? 'expired' : 'invalid'}. You can still respond manually below.
+          </div>
+        )}
+
         {openAsks.length > 0 && (
           <div className="mb-6">
-            <AuthorResponsePanel asks={openAsks} viewerEmail={email ?? '(workspace owner)'} />
+            <AuthorResponsePanel
+              asks={openAsks}
+              viewerEmail={email ?? '(workspace owner)'}
+              prefilledRespondingAs={prefilledRespondingAs}
+              focusThreadId={focusThreadId}
+            />
           </div>
         )}
 

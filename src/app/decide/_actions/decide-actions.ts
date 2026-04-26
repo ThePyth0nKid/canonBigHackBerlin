@@ -1,6 +1,7 @@
 'use server';
 
 import { auth } from '@/auth';
+import { prisma } from '@/lib/prisma';
 import {
   askSourceAuthors as askCore,
   recordResponse as respondCore,
@@ -9,6 +10,7 @@ import {
   resolveByAuthority as resolveCore,
   type ResponseChoice,
 } from '@/lib/canon/decide';
+import { sendAskEmails } from '@/lib/canon/decide-mail';
 
 async function requireUser(): Promise<{ userId: string; email: string } | null> {
   const session = await auth();
@@ -26,12 +28,105 @@ export async function askSourceAuthorsAction(input: {
 }) {
   const me = await requireUser();
   if (!me) return { ok: false as const, reason: 'auth' };
-  return askCore({
+
+  const result = await askCore({
     userId: me.userId,
     entity: input.entity,
     metricKey: input.metricKey,
     conflictFactIds: input.conflictFactIds,
   });
+
+  // Email dispatch is fire-and-forget AFTER the FactEvent is committed —
+  // a Resend outage must never roll back the signed ask. The mail
+  // outcome is recorded as a separate audit annotation. Slack-author
+  // addressees are skipped (Slack DM is V3 — no token plumbing yet).
+  if (result.ok && result.threadId && result.addressees && result.addressees.length > 0) {
+    const gmailRecipients = result.addressees.filter((a) => a.kind === 'gmail');
+    if (gmailRecipients.length > 0) {
+      await dispatchAskEmails({
+        userId: me.userId,
+        threadId: result.threadId,
+        entity: input.entity,
+        metricKey: input.metricKey,
+        conflictFactIds: input.conflictFactIds,
+        recipients: gmailRecipients.map((a) => ({ personaEmail: a.id })),
+      });
+    }
+  }
+
+  return result;
+}
+
+async function dispatchAskEmails(args: {
+  userId: string;
+  threadId: string;
+  entity: string;
+  metricKey: string;
+  conflictFactIds: string[];
+  recipients: { personaEmail: string }[];
+}): Promise<void> {
+  // Resolve persona display names from User table for friendlier email greetings.
+  const users = await prisma.user.findMany({
+    where: { email: { in: args.recipients.map((r) => r.personaEmail) } },
+    select: { email: true, name: true },
+  });
+  const nameByEmail = new Map(users.map((u) => [u.email?.toLowerCase() ?? '', u.name]));
+
+  // Fetch the candidate facts so the email body has concrete competing values.
+  const facts = await prisma.factEvent.findMany({
+    where: { id: { in: args.conflictFactIds }, userId: args.userId },
+    select: { metricValue: true, sourceRef: true },
+  });
+  const candidateLines = facts.map((f) => {
+    const kind = f.sourceRef.split(':')[0] ?? 'source';
+    return `${f.metricValue ?? '(no value)'} via ${kind}`;
+  });
+
+  const baseUrl = process.env.AUTH_URL ?? 'https://canon.ultranova.io';
+  const recipientsWithNames = args.recipients.map((r) => ({
+    personaEmail: r.personaEmail,
+    personaName: nameByEmail.get(r.personaEmail.toLowerCase()) ?? undefined,
+  }));
+
+  let outcome;
+  try {
+    outcome = await sendAskEmails({
+      threadId: args.threadId,
+      entity: args.entity,
+      metricKey: args.metricKey,
+      candidateLines,
+      recipients: recipientsWithNames,
+      baseUrl,
+    });
+  } catch (e) {
+    outcome = {
+      attempted: args.recipients.length,
+      sent: 0,
+      failed: args.recipients.map((r) => ({
+        personaEmail: r.personaEmail,
+        error: (e as Error).message,
+      })),
+    };
+  }
+
+  // Audit annotation: write a tiny note onto the ask FactEvent's notes
+  // field summarising the dispatch outcome. We use prisma.update on the
+  // ask event identified by sourceRef='decide:ask:<threadId>'.
+  try {
+    const ask = await prisma.factEvent.findFirst({
+      where: { userId: args.userId, sourceRef: `decide:ask:${args.threadId}` },
+      select: { id: true, notes: true },
+    });
+    if (ask) {
+      const suffix = `:mail=sent=${outcome.sent}/${outcome.attempted}${outcome.failed.length > 0 ? `:mail-fail=${outcome.failed.map((f) => f.personaEmail).join(',')}` : ''}`;
+      await prisma.factEvent.update({
+        where: { id: ask.id },
+        data: { notes: `${ask.notes ?? ''}${suffix}` },
+      });
+    }
+  } catch (e) {
+    console.error('[decide-mail] audit annotation failed:', (e as Error).message);
+  }
 }
 
 export async function recordResponseAction(input: {
