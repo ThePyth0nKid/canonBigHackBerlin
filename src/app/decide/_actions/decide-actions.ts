@@ -10,7 +10,7 @@ import {
   resolveByAuthority as resolveCore,
   type ResponseChoice,
 } from '@/lib/canon/decide';
-import { sendAskEmails } from '@/lib/canon/decide-mail';
+import { sendAskEmails, sendEscalationNotification } from '@/lib/canon/decide-mail';
 
 async function requireUser(): Promise<{ userId: string; email: string } | null> {
   const session = await auth();
@@ -155,7 +155,20 @@ export async function recordResponseAction(input: {
 export async function escalateAction(input: { threadId: string }) {
   const me = await requireUser();
   if (!me) return { ok: false as const, reason: 'auth' };
-  return escalateCore({ userId: me.userId, threadId: input.threadId });
+  const result = await escalateCore({ userId: me.userId, threadId: input.threadId });
+  // Notification email so the demo flow shows a fresh email for every
+  // escalation click. The role's authority is the recipient identity in
+  // the magic-link token.
+  if (result.ok && result.role && result.authorityEmail) {
+    await dispatchEscalationNotification({
+      userId: me.userId,
+      threadId: input.threadId,
+      role: result.role,
+      authorityEmail: result.authorityEmail,
+      kind: 'escalation_after_divergence',
+    });
+  }
+  return result;
 }
 
 /**
@@ -170,12 +183,75 @@ export async function escalateDirectlyAction(input: {
 }) {
   const me = await requireUser();
   if (!me) return { ok: false as const, reason: 'auth' };
-  return escalateDirectCore({
+  const result = await escalateDirectCore({
     userId: me.userId,
     entity: input.entity,
     metricKey: input.metricKey,
     conflictFactIds: input.conflictFactIds,
   });
+  // Even when no human authors are reachable, fire a notification email
+  // to the workspace owner so the on-stage demo always sees an email
+  // arrive within seconds of every click. This is honest about the
+  // routing (the email subject says "Canon escalated to <role>") and
+  // gives the audience a continuous email beat across all card types.
+  if (result.ok && result.threadId && result.role && result.authorityEmail) {
+    await dispatchEscalationNotification({
+      userId: me.userId,
+      threadId: result.threadId,
+      role: result.role,
+      authorityEmail: result.authorityEmail,
+      kind: 'ask_skipped_no_authors',
+    });
+  }
+  return result;
+}
+
+async function dispatchEscalationNotification(args: {
+  userId: string;
+  threadId: string;
+  role: string;
+  authorityEmail: string;
+  kind: 'ask_skipped_no_authors' | 'escalation_after_divergence';
+}): Promise<void> {
+  // Resolve entity, metricKey, and competing facts via the thread's ask event.
+  const ask = await prisma.factEvent.findFirst({
+    where: { userId: args.userId, sourceRef: `decide:ask:${args.threadId}` },
+    select: { entity: true, metricKey: true, notes: true },
+  });
+  if (!ask?.entity || !ask?.metricKey) return;
+
+  const conflictMatch = ask.notes?.match(/(?:^|:)conflictFacts=([^:]+)/);
+  const conflictFactIds = conflictMatch?.[1].split(',').filter(Boolean) ?? [];
+  const facts = await prisma.factEvent.findMany({
+    where: { id: { in: conflictFactIds }, userId: args.userId },
+    select: { metricValue: true, sourceRef: true },
+  });
+  const candidateLines = facts.map((f) => {
+    const kind = f.sourceRef.split(':')[0] ?? 'source';
+    return `${f.metricValue ?? '(no value)'} via ${kind}`;
+  });
+
+  const baseUrl = process.env.AUTH_URL ?? 'https://canon.ultranova.io';
+  try {
+    const outcome = await sendEscalationNotification({
+      threadId: args.threadId,
+      entity: ask.entity,
+      metricKey: ask.metricKey,
+      candidateLines,
+      role: args.role,
+      authorityEmail: args.authorityEmail,
+      kind: args.kind,
+      baseUrl,
+    });
+    console.log(
+      `[decide-mail] escalation notification ${outcome.sent ? 'sent' : 'failed'} for thread=${args.threadId}${outcome.error ? ': ' + outcome.error : ''}`,
+    );
+  } catch (e) {
+    console.error(
+      '[decide-mail] escalation notification threw:',
+      (e as Error).message,
+    );
+  }
 }
 
 export async function resolveByAuthorityAction(input: {

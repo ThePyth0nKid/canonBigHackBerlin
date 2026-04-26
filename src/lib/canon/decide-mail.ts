@@ -231,6 +231,144 @@ export async function sendAskEmails(args: SendAskEmailsArgs): Promise<SendAskEma
   return result;
 }
 
+// ============================================================
+// Escalation notification email
+//
+// Fires on EVERY ask/escalate action, including the no-human-author
+// case (escalateDirectly) where there's nobody to ask. Lets the demo
+// audience see Canon emit a notification for every routing decision —
+// both ask and escalate trigger an email so the on-stage flow is
+// "click → email lands in inbox" with zero exceptions.
+// ============================================================
+
+export interface SendEscalationNotificationArgs {
+  threadId: string;
+  entity: string;
+  metricKey: string;
+  candidateLines: string[];
+  /** Role the conflict was routed to (cfo / revops_lead / deal_owner). */
+  role: string;
+  /** Human-readable email of the role's authority (recorded in audit). */
+  authorityEmail: string;
+  /** Reason the email is being sent — drives subject and body copy. */
+  kind: 'ask_skipped_no_authors' | 'escalation_after_divergence';
+  baseUrl: string;
+}
+
+export interface SendNotificationResult {
+  sent: boolean;
+  error?: string;
+}
+
+export async function sendEscalationNotification(
+  args: SendEscalationNotificationArgs,
+): Promise<SendNotificationResult> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return { sent: false, error: 'RESEND_API_KEY not set' };
+
+  const resend = new Resend(apiKey);
+  const from = process.env.CANON_DECIDE_FROM ?? FROM_DEFAULT;
+  const demoRecipient =
+    process.env.CANON_DECIDE_DEMO_TO ??
+    process.env.CANON_DEMO_TO ??
+    DEMO_RECIPIENT_DEFAULT;
+
+  // Magic-link with persona = the authority role's email, so when clicked
+  // /decide can render the card scoped to "Acting as <role authority>".
+  const tokenParts = signMagicToken({
+    threadId: args.threadId,
+    as: args.authorityEmail,
+  });
+  const link = buildMagicLinkUrl(args.baseUrl, tokenParts);
+
+  const subjectKindLabel =
+    args.kind === 'ask_skipped_no_authors'
+      ? `escalated to ${args.role}`
+      : `escalated to ${args.role} (authors diverged)`;
+  const subject = `[for ${args.authorityEmail}] Canon ${subjectKindLabel}: ${args.entity}.${args.metricKey}`;
+
+  const html = renderEscalationHtml({ ...args, link });
+  const text = renderEscalationText({ ...args, link });
+
+  try {
+    const res = await resend.emails.send({
+      from,
+      to: demoRecipient,
+      replyTo: from,
+      subject,
+      html,
+      text,
+      headers: {
+        'X-Canon-Thread': args.threadId,
+        'X-Canon-Kind': args.kind,
+        'X-Canon-Role': args.role,
+      },
+    });
+    if (res.error) return { sent: false, error: res.error.message };
+    return { sent: true };
+  } catch (e) {
+    return { sent: false, error: (e as Error).message };
+  }
+}
+
+function renderEscalationHtml(args: SendEscalationNotificationArgs & { link: string }): string {
+  const reason =
+    args.kind === 'ask_skipped_no_authors'
+      ? `All sources for this conflict are automated — there's no human author to ask. Canon routed it directly to <strong>${escapeHtml(args.role)}</strong>.`
+      : `The source-authors couldn't agree, so Canon escalated this conflict to <strong>${escapeHtml(args.role)}</strong>.`;
+  const claimsList = args.candidateLines
+    .map((c) => `<li style="margin: 4px 0;"><code>${escapeHtml(c)}</code></li>`)
+    .join('');
+  return `<!doctype html>
+<html>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.5; color: #1f2937; max-width: 560px; margin: 0 auto; padding: 24px;">
+  <div style="background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px;">
+    <p style="margin: 0; font-size: 11px; font-family: ui-monospace, monospace; color: #c2410c; text-transform: uppercase; letter-spacing: 0.08em;">
+      Escalated to · ${escapeHtml(args.role)}
+    </p>
+    <p style="margin: 2px 0 0; font-size: 15px; font-weight: 600; color: #7c2d12;">
+      ${escapeHtml(args.authorityEmail)}
+    </p>
+  </div>
+  <h2 style="font-size: 18px; margin: 0 0 12px;">Canon escalated a conflict to you</h2>
+  <p style="font-size: 14px; margin: 0 0 16px;">
+    ${reason} You need to pick canonical truth on
+    <strong style="font-family: ui-monospace, monospace;">${escapeHtml(args.entity)}.${escapeHtml(args.metricKey)}</strong>.
+  </p>
+  <p style="font-size: 13px; margin: 0 0 8px; color: #6b7280;">Competing claims:</p>
+  <ul style="font-size: 13px; margin: 0 0 20px; padding-left: 20px;">${claimsList}</ul>
+  <p style="margin: 0 0 24px;">
+    <a href="${args.link}" style="display: inline-block; background: #c2410c; color: #fff; padding: 10px 18px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+      Open Canon to decide →
+    </a>
+  </p>
+  <p style="font-size: 11px; color: #9ca3af; margin: 16px 0 0;">
+    Your decision is signed (Ed25519) and joins the same hash-chained ledger every Canon agent reads from.
+    Link expires in 24 hours.
+  </p>
+</body>
+</html>`;
+}
+
+function renderEscalationText(args: SendEscalationNotificationArgs & { link: string }): string {
+  const reason =
+    args.kind === 'ask_skipped_no_authors'
+      ? `All sources are automated; Canon routed this directly to ${args.role}.`
+      : `Source-authors couldn't agree; Canon escalated to ${args.role}.`;
+  return [
+    `Canon escalated ${args.entity}.${args.metricKey} to ${args.role} (${args.authorityEmail}).`,
+    '',
+    reason,
+    '',
+    'Competing claims:',
+    ...args.candidateLines.map((c) => `  - ${c}`),
+    '',
+    `Open Canon to decide:  ${args.link}`,
+    '',
+    'Your decision is signed and joins the same hash-chained ledger every Canon agent reads from. Link expires in 24h.',
+  ].join('\n');
+}
+
 function renderHtml(args: {
   personaEmail: string;
   personaName?: string;
