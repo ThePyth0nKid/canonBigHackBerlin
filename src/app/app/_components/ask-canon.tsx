@@ -33,9 +33,9 @@ import { AskFightCard } from './ask-fight-card';
 import { BrandChip, brandFor } from './ask-source-brand';
 
 const SUGGESTIONS = [
-  'What\'s the conflict on Miller Group?',
+  'What\'s the conflict on Gonzalez Inc?',
+  'What conflicts exist for Johnson Group?',
   'Which products have a corroborated price?',
-  'Who is the primary contact at Gonzalez Inc?',
   'What\'s Bright Plc\'s relationship type?',
 ] as const;
 
@@ -88,7 +88,7 @@ export function AskCanon() {
             type="text"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder="e.g. What's Miller Group's industry?  ·  Why is the Gonzalez Inc tier conflicted?"
+            placeholder="e.g. What's Gonzalez Inc's monthly revenue?  ·  Why is Johnson Group's industry conflicted?"
             disabled={pending}
             className="mt-1 w-full rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 outline-none transition-colors focus:border-violet-500 focus:ring-2 focus:ring-violet-500/40 disabled:opacity-60 dark:border-violet-700/40 dark:bg-zinc-900 dark:text-zinc-100"
           />
