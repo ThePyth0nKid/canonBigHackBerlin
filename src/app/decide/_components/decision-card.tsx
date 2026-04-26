@@ -125,7 +125,12 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
   const noAuthors = card.authorAvailability === 'none';
   const partialAuthors = card.authorAvailability === 'partial';
   const showAuthorityPickUI = stage === 'escalated';
-  const directDecideAvailable = stage !== 'resolved';
+  // Direct-decide bypasses the escalation thread. Hide it when the card
+  // is already in an escalation chain — there, the right button is
+  // "Pick as authority" so the resolution stays linked to the thread.
+  // Showing both creates a confusing two-button choice for the same
+  // outcome ("warum sind da jetzt zwei Optionen?").
+  const directDecideAvailable = stage !== 'resolved' && stage !== 'escalated';
 
   return (
     <article

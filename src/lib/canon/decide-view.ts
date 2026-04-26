@@ -322,6 +322,12 @@ export async function loadOpenAuthorAsks(
   for (const ask of asks) {
     const meta = parseNotes(ask.notes ?? '');
     if (!meta?.threadId || !meta.entity || !meta.metricKey) continue;
+    // Filter out synthetic asks from escalateDirectly. Those are anchors
+    // for the chain when there are no human authors to ping — they should
+    // never appear in a "Questions for source-authors" panel because
+    // there are no humans to answer. Detected via the explicit
+    // `skipped=no_human_authors` marker we write in escalateDirectly.
+    if ((ask.notes ?? '').includes('skipped=no_human_authors')) continue;
     // Filter out asks already resolved.
     const resolved = await prisma.factEvent.findFirst({
       where: { userId, workspace, sourceRef: `decide:resolution:${meta.threadId}` },
