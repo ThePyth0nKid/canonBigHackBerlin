@@ -1,5 +1,3 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import {
   getCanonCustomRuleStatus,
   type CanonCustomRuleStatus,
@@ -8,51 +6,43 @@ import {
 /**
  * Layer 3 — trust-gate banner.
  *
- * The rule is authored in Semgrep YAML and runs on Opengrep, the
- * open-source Semgrep CE fork backed by a 10-org AppSec consortium of
- * which Aikido is a founding member (alongside Arnica, Amplify, Endor
- * Labs, Jit, Kodem, Legit, Mobb, Orca, Phoenix). Same grammar Aikido's
- * hosted SAST runs on — so the pitch is "Aikido scans the repo (top
- * banner) AND we run our own custom rules on the same engine family
- * Aikido helps maintain (bottom banner)" without overclaim.
+ * The rule is authored in Semgrep YAML at `.semgrep/canon-trust-gate.yml`
+ * and runs on Opengrep, the open-source Semgrep CE fork backed by a
+ * 10-org AppSec consortium of which Aikido is a founding member
+ * (alongside Arnica, Amplify, Endor Labs, Jit, Kodem, Legit, Mobb,
+ * Orca, Phoenix). Same grammar Aikido's hosted SAST runs on — pitch
+ * is "Aikido scans the repo (top banner) AND we run our own custom
+ * rules on the same engine family Aikido helps maintain (bottom
+ * banner)" without overclaim.
  *
- * Two data sources, both real:
- *   1. The local YAML at `.semgrep/canon-trust-gate.yml`, parsed at
- *      render time. Banner cannot lie — it's data-bound to the actual
- *      repo artifact.
- *   2. The Aikido REST API — surfaces workspace + tracked-repo as live
- *      attestation that Aikido's hosted SAST is watching this codebase.
+ * The rule-side counts below are inlined as constants — the rule file
+ * lives in the repo and only changes when we deliberately edit it, so
+ * a runtime fs.readFile would just be ceremony. **Keep these in sync
+ * with `.semgrep/canon-trust-gate.yml`** if you add/remove rules,
+ * patterns, or excludes.
+ *
+ * The Aikido side is fetched live every 30s (workspace + tracked
+ * repo from the public REST API) so the "Aikido watches this repo"
+ * claim is data-bound and can never go stale.
  */
 
 const OPENGREP_VERSION = '1.20.0';
 
-type LocalRule = {
-  ruleCount: number;
-  patternCount: number;
-  hasTaintRule: boolean;
-  hasRawSqlRule: boolean;
-  uniqueExcludes: number;
-};
+const RULE_INFO = {
+  ruleCount: 3,
+  patternCount: 29,
+  hasTaintRule: true,
+  hasRawSqlRule: true,
+  uniqueExcludes: 13,
+} as const;
 
-type BannerState =
-  | { kind: 'offline'; reason: 'no-rule-file' }
-  | {
-      kind: 'live';
-      local: LocalRule;
-      aikido: CanonCustomRuleStatus | null;
-      aikidoError: string | null;
-    };
-
-let localCache: Promise<LocalRule | null> | null = null;
-function getLocalRule(): Promise<LocalRule | null> {
-  if (!localCache) localCache = loadLocalRule();
-  return localCache;
-}
+const COVERAGE = ['direct write', 'aliased / destructured', 'raw SQL'] as const;
 
 const AIKIDO_TTL_MS = 30_000;
 let aikidoCache:
   | { at: number; promise: Promise<CanonCustomRuleStatus> }
   | null = null;
+
 function getAikidoStatus(): Promise<CanonCustomRuleStatus> {
   const now = Date.now();
   if (aikidoCache && now - aikidoCache.at < AIKIDO_TTL_MS) return aikidoCache.promise;
@@ -64,88 +54,13 @@ function getAikidoStatus(): Promise<CanonCustomRuleStatus> {
   return promise;
 }
 
-async function loadState(): Promise<BannerState> {
-  const local = await getLocalRule();
-  if (!local) return { kind: 'offline', reason: 'no-rule-file' };
-
+export async function TrustGateBanner() {
   let aikido: CanonCustomRuleStatus | null = null;
-  let aikidoError: string | null = null;
   try {
     aikido = await getAikidoStatus();
-  } catch (err) {
-    aikidoError = (err as Error).message.slice(0, 80);
-  }
-  return { kind: 'live', local, aikido, aikidoError };
-}
-
-async function loadLocalRule(): Promise<LocalRule | null> {
-  try {
-    const rulePath = path.join(process.cwd(), '.semgrep/canon-trust-gate.yml');
-    const yml = await readFile(rulePath, 'utf8');
-
-    const ruleCount = (yml.match(/^\s*-\s*id:\s/gm) ?? []).length;
-    const patternCount = (yml.match(/^\s*-\s*pattern(-regex)?:\s/gm) ?? []).length;
-    const hasTaintRule = /\bmode:\s*taint\b/.test(yml);
-    const hasRawSqlRule = /\$executeRaw|Prisma\\?\.sql/.test(yml);
-
-    const lines = yml.split('\n');
-    const uniq = new Set<string>();
-    let inExclude = false;
-    let excludeIndent = 0;
-    for (const line of lines) {
-      const m = line.match(/^(\s*)exclude:\s*$/);
-      if (m) {
-        inExclude = true;
-        excludeIndent = m[1].length;
-        continue;
-      }
-      if (inExclude) {
-        const stripped = line.replace(/\s+$/, '');
-        if (!stripped) continue;
-        const indent = line.match(/^\s*/)?.[0].length ?? 0;
-        if (indent <= excludeIndent && /\S/.test(stripped)) {
-          inExclude = false;
-          continue;
-        }
-        const item = line.trim();
-        if (item.startsWith('- ')) {
-          uniq.add(item.slice(2).replace(/^['"]|['"]$/g, ''));
-        }
-      }
-    }
-
-    if (ruleCount === 0) return null;
-    return {
-      ruleCount,
-      patternCount,
-      hasTaintRule,
-      hasRawSqlRule,
-      uniqueExcludes: uniq.size,
-    };
   } catch {
-    return null;
+    // Banner still renders with rule-side data — Aikido offline is OK.
   }
-}
-
-export async function TrustGateBanner() {
-  const state = await loadState();
-
-  if (state.kind === 'offline') {
-    return (
-      <div className="flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-4 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-950">
-        <span className="inline-block h-2 w-2 rounded-full bg-zinc-400" aria-hidden />
-        <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-zinc-500">
-          aikido · opengrep
-        </span>
-        <span className="text-zinc-400">offline</span>
-      </div>
-    );
-  }
-
-  const { local, aikido } = state;
-  const coverage: string[] = ['direct write'];
-  if (local.hasTaintRule) coverage.push('aliased / destructured');
-  if (local.hasRawSqlRule) coverage.push('raw SQL');
 
   return (
     <details className="group rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-950">
@@ -159,11 +74,11 @@ export async function TrustGateBanner() {
         </span>
         <span className="text-zinc-700 dark:text-zinc-300">
           canon-trust-gate /{' '}
-          <span className="font-medium">{local.ruleCount} rules</span>
+          <span className="font-medium">{RULE_INFO.ruleCount} rules</span>
         </span>
         <span className="text-zinc-400">·</span>
         <span className="font-mono text-[10px] uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
-          enforced in ci · {local.patternCount} patterns
+          enforced in ci · {RULE_INFO.patternCount} patterns
         </span>
         <span
           aria-hidden
@@ -194,10 +109,10 @@ export async function TrustGateBanner() {
             link={{ label: 'opengrep.dev →', href: 'https://opengrep.dev/' }}
             rows={[
               ['engine', `opengrep v${OPENGREP_VERSION}`],
-              ['rules', String(local.ruleCount)],
-              ['match patterns', String(local.patternCount)],
-              ['coverage', coverage.join(' + ')],
-              ['audited paths', String(local.uniqueExcludes)],
+              ['rules', String(RULE_INFO.ruleCount)],
+              ['match patterns', String(RULE_INFO.patternCount)],
+              ['coverage', COVERAGE.join(' + ')],
+              ['audited paths', String(RULE_INFO.uniqueExcludes)],
             ]}
             footer="source · .semgrep/canon-trust-gate.yml · npm run trust-gate"
           />
