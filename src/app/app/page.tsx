@@ -17,6 +17,9 @@ import { EntitySection } from './_components/entity-section';
 import { TailLoader } from './_components/tail-loader';
 import { ConnectedSources } from './_components/connected-sources';
 import { AskCanon } from './_components/ask-canon';
+import { PendingResolutionsPanel } from './_components/pending-resolutions-panel';
+import { loadPendingResolutions } from '@/lib/canon/pending-view';
+import { readCosignFocusCookie } from '@/lib/canon/cosign-cookie';
 import { TopBar } from '../_components/top-bar';
 
 export const dynamic = 'force-dynamic';
@@ -52,6 +55,12 @@ export default async function WorkspacePage({ searchParams }: WorkspacePageProps
   const decisionBadge = await loadDecisionBadge(userId, activeWorkspace);
   const userEmail = (session.user as { email?: string | null }).email ?? null;
 
+  // 4-eyes pending tracker — workspace-scoped (not userId-scoped) so a
+  // second admin signed in with a different OAuth identity can see and
+  // co-sign the initiator's pending picks.
+  const pendingResolutions = await loadPendingResolutions(activeWorkspace);
+  const cosignFocus = await readCosignFocusCookie();
+
   return (
     <main className="flex flex-1 flex-col">
       <TopBar activeTab="ledger" openCount={decisionBadge} userEmail={userEmail} />
@@ -67,6 +76,15 @@ export default async function WorkspacePage({ searchParams }: WorkspacePageProps
               </span>
             </div>
           </div>
+
+          {/* 4-eyes pending tracker — sits ABOVE AskCanon when there are
+              pending high-risk picks. Hidden when empty so it doesn't take
+              the spotlight from the question box. */}
+          <PendingResolutionsPanel
+            pending={pendingResolutions}
+            viewerEmail={userEmail ?? ''}
+            focusResolutionFactId={cosignFocus}
+          />
 
           {/* Ask-Canon hero — sits directly under the H1 because the
               audience asks "what can I do here?" first; everything below
