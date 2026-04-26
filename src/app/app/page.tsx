@@ -19,7 +19,7 @@ import { ConnectedSources } from './_components/connected-sources';
 import { AskCanon } from './_components/ask-canon';
 import { PendingResolutionsPanel } from './_components/pending-resolutions-panel';
 import { loadPendingResolutions } from '@/lib/canon/pending-view';
-import { readCosignFocusCookie } from '@/lib/canon/cosign-cookie';
+import { readCosignContext } from '@/lib/canon/cosign-cookie';
 import { TopBar } from '../_components/top-bar';
 
 export const dynamic = 'force-dynamic';
@@ -60,7 +60,11 @@ export default async function WorkspacePage({ searchParams }: WorkspacePageProps
   // second admin signed in with a different OAuth identity can see and
   // co-sign the initiator's pending picks.
   const pendingResolutions = await loadPendingResolutions(activeWorkspace);
-  const cosignFocus = await readCosignFocusCookie();
+  // The cosign cookie is set by /app/cosign?res=…&token=… after a
+  // magic-link verifies. It carries both the resolutionFactId (for
+  // panel highlight) and the asEmail (the effective cosigner identity
+  // for the matching row, distinct from session.user.email).
+  const cosignCtx = await readCosignContext();
 
   return (
     <main className="flex flex-1 flex-col">
@@ -98,7 +102,8 @@ export default async function WorkspacePage({ searchParams }: WorkspacePageProps
           <PendingResolutionsPanel
             pending={pendingResolutions}
             viewerEmail={userEmail ?? ''}
-            focusResolutionFactId={cosignFocus}
+            focusResolutionFactId={cosignCtx?.resolutionFactId ?? null}
+            cosignAsEmail={cosignCtx?.asEmail ?? null}
           />
 
           {/* Ask-Canon hero — sits directly under the H1 because the

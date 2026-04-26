@@ -31,12 +31,23 @@ export interface PendingResolutionsPanelProps {
    * cosigner doesn't have to find it.
    */
   focusResolutionFactId?: string | null;
+  /**
+   * When the viewer arrived via magic-link, this is the email the
+   * cookie was issued to (the intended cosigner). For the row matching
+   * focusResolutionFactId, this email — NOT the OAuth session email —
+   * is the effective cosigner identity. Without this prop the panel
+   * would show "awaiting different admin" when an initiator clicks
+   * their own magic-link via a different inbox, even though the
+   * server action would happily authorise the cosign.
+   */
+  cosignAsEmail?: string | null;
 }
 
 export function PendingResolutionsPanel({
   pending,
   viewerEmail,
   focusResolutionFactId,
+  cosignAsEmail,
 }: PendingResolutionsPanelProps) {
   if (pending.length === 0) return null;
   return (
@@ -62,14 +73,23 @@ export function PendingResolutionsPanel({
         leaves a permanent audit trace.
       </p>
       <ol className="space-y-2">
-        {pending.map((p) => (
-          <PendingRow
-            key={p.resolutionFactId}
-            row={p}
-            viewerEmail={viewerEmail}
-            focused={p.resolutionFactId === focusResolutionFactId}
-          />
-        ))}
+        {pending.map((p) => {
+          const isFocused = p.resolutionFactId === focusResolutionFactId;
+          // If THIS row matches the magic-link cookie, the effective
+          // cosigner identity is the cookie's asEmail — not the
+          // OAuth session email. For all other rows, fall back to the
+          // session email (the "I'm signed in as X" identity).
+          const effectiveEmail = isFocused && cosignAsEmail ? cosignAsEmail : viewerEmail;
+          return (
+            <PendingRow
+              key={p.resolutionFactId}
+              row={p}
+              viewerEmail={viewerEmail}
+              effectiveEmail={effectiveEmail}
+              focused={isFocused}
+            />
+          );
+        })}
       </ol>
     </section>
   );
@@ -78,10 +98,14 @@ export function PendingResolutionsPanel({
 function PendingRow({
   row,
   viewerEmail,
+  effectiveEmail,
   focused,
 }: {
   row: PendingResolution;
   viewerEmail: string;
+  /** Effective cosigner identity — cookie.asEmail if the user arrived via
+   *  magic-link for THIS row, else the OAuth session email. */
+  effectiveEmail: string;
   focused: boolean;
 }) {
   const router = useRouter();
@@ -90,7 +114,7 @@ function PendingRow({
   const [done, setDone] = useState<{ supersededNow: number; cosignerEmail: string } | null>(null);
 
   const isInitiator =
-    !!viewerEmail && viewerEmail.toLowerCase() === row.initiatorEmail.toLowerCase();
+    !!effectiveEmail && effectiveEmail.toLowerCase() === row.initiatorEmail.toLowerCase();
 
   function submit() {
     setError(null);
