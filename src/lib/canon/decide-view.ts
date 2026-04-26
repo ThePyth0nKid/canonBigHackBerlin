@@ -122,13 +122,30 @@ export async function loadDecisionInbox(
     orderBy: { signedAt: 'asc' },
   });
 
-  const byEntityMetric = new Map<string, ThreadEventBrief[]>();
+  // Group events by threadId (extracted from sourceRef like decide:KIND:THREAD).
+  // Then resolve each thread to (entity, metricKey) via its ask event's notes —
+  // ask is the only stage that carries the full thread metadata. Earlier
+  // versions grouped by (entity, metricKey) read from each event's notes,
+  // which silently dropped escalation/response/resolution events whose notes
+  // don't repeat the thread metadata. That made click-through stages invisible.
+  const byThread = new Map<string, ThreadEventBrief[]>();
   for (const ev of threadEvents) {
-    const meta = parseNotes(ev.notes ?? '');
+    const m = ev.sourceRef.match(/^decide:[^:]+:(.+)$/);
+    if (!m) continue;
+    const threadId = m[1];
+    if (!byThread.has(threadId)) byThread.set(threadId, []);
+    byThread.get(threadId)!.push(ev);
+  }
+
+  const byEntityMetric = new Map<string, ThreadEventBrief[]>();
+  for (const [, events] of byThread) {
+    const ask = events.find((e) => e.sourceRef.startsWith('decide:ask:'));
+    if (!ask) continue;
+    const meta = parseNotes(ask.notes ?? '');
     if (!meta?.entity || !meta?.metricKey) continue;
     const k = `${meta.entity}::${meta.metricKey}`;
     if (!byEntityMetric.has(k)) byEntityMetric.set(k, []);
-    byEntityMetric.get(k)!.push(ev);
+    byEntityMetric.get(k)!.push(...events);
   }
 
   const cards: DecisionCard[] = [];

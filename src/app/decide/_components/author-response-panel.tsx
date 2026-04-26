@@ -58,18 +58,25 @@ export function AuthorResponsePanel({
   }
 
   // Locked-mode filtering: if a magic-link was verified, scope to the
-  // focused thread and the verified persona.
-  const locked = Boolean(prefilledRespondingAs);
-  const visibleAsks = locked && focusThreadId
-    ? asks.filter((a) => a.threadId === focusThreadId)
-    : asks;
+  // focused thread and the verified persona — but only if that thread
+  // is still open. If the thread is gone (settled, or stale smoke-test
+  // token), gracefully degrade to free mode so the user still sees
+  // their other open asks instead of a dead-end "settled" screen.
+  const matchedAsks =
+    prefilledRespondingAs && focusThreadId
+      ? asks.filter((a) => a.threadId === focusThreadId)
+      : [];
+  const locked = matchedAsks.length > 0;
+  const visibleAsks = locked ? matchedAsks : asks;
+  const staleMagicLink = Boolean(prefilledRespondingAs) && matchedAsks.length === 0;
 
   if (visibleAsks.length === 0) {
-    if (locked) {
+    if (staleMagicLink) {
       return (
         <section className="rounded-xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-900 dark:bg-amber-950/30">
           <p className="text-sm text-amber-900 dark:text-amber-200">
-            This question is already settled — no further response is needed.
+            That magic-link points to a thread that's already settled (or never existed).
+            No open questions are waiting for you right now.
           </p>
         </section>
       );
@@ -88,7 +95,9 @@ export function AuthorResponsePanel({
         <span className="font-mono text-[10px] text-amber-700 dark:text-amber-400">
           {locked
             ? `acting as ${prefilledRespondingAs}`
-            : `signed in as ${viewerEmail}`}
+            : prefilledRespondingAs
+              ? `magic-link verified as ${prefilledRespondingAs}`
+              : `signed in as ${viewerEmail}`}
         </span>
       </header>
 
