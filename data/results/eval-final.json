@@ -1,0 +1,137 @@
+{
+  "gold_count": 77,
+  "systems": [
+    {
+      "name": "Pioneer GLiNER-2 (zero-shot)",
+      "by_label": {
+        "EMPLOYEE": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 85
+        },
+        "EMPLOYEE_ID": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 18
+        },
+        "CUSTOMER_ID": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 16
+        },
+        "PRODUCT_ID": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 12
+        },
+        "TICKET_ID": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 8
+        },
+        "THREAD_ID": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 8
+        },
+        "AMOUNT": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 20
+        },
+        "DEPARTMENT": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 53
+        },
+        "POLICY_NAME": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 8
+        },
+        "DATE": {
+          "P": 0.0,
+          "R": 0.0,
+          "F1": 0.0,
+          "support": 35
+        }
+      },
+      "macro_f1": 0.0
+    },
+    {
+      "name": "Gemini 2.5-flash (frontier)",
+      "by_label": {
+        "EMPLOYEE": {
+          "P": 0.8333333333333334,
+          "R": 1.0,
+          "F1": 0.9090909090909091,
+          "support": 85
+        },
+        "EMPLOYEE_ID": {
+          "P": 1.0,
+          "R": 1.0,
+          "F1": 1.0,
+          "support": 18
+        },
+        "CUSTOMER_ID": {
+          "P": 1.0,
+          "R": 0.9375,
+          "F1": 0.967741935483871,
+          "support": 16
+        },
+        "PRODUCT_ID": {
+          "P": 1.0,
+          "R": 1.0,
+          "F1": 1.0,
+          "support": 12
+        },
+        "TICKET_ID": {
+          "P": 1.0,
+          "R": 1.0,
+          "F1": 1.0,
+          "support": 8
+        },
+        "THREAD_ID": {
+          "P": 1.0,
+          "R": 1.0,
+          "F1": 1.0,
+          "support": 8
+        },
+        "AMOUNT": {
+          "P": 1.0,
+          "R": 1.0,
+          "F1": 1.0,
+          "support": 20
+        },
+        "DEPARTMENT": {
+          "P": 0.8947368421052632,
+          "R": 0.9622641509433962,
+          "F1": 0.9272727272727272,
+          "support": 53
+        },
+        "POLICY_NAME": {
+          "P": 1.0,
+          "R": 1.0,
+          "F1": 1.0,
+          "support": 8
+        },
+        "DATE": {
+          "P": 0.7608695652173914,
+          "R": 1.0,
+          "F1": 0.8641975308641976,
+          "support": 35
+        }
+      },
+      "macro_f1": 0.9668303102711706
+    }
+  ]
+}

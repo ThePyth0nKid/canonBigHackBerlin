@@ -1,0 +1,18 @@
+{
+  "total_snippets": 896,
+  "valid_examples": 819,
+  "train": 720,
+  "val": 99,
+  "rejects": {
+    "substring_not_found_or_bad": 19,
+    "token_align_fail": 1
+  },
+  "by_label": {
+    "EMPLOYEE": 1266,
+    "DEPARTMENT": 821,
+    "DATE": 284,
+    "POLICY_NAME": 23,
+    "EMPLOYEE_ID": 36,
+    "AMOUNT": 46
+  }
+}
