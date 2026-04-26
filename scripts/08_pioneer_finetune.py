@@ -54,13 +54,13 @@ def _get(path):
 
 
 def step1_combine_data():
-    """Merge train + val into a single JSONL file (Pioneer auto-splits)."""
-    train = (REPO / "data" / "synth" / "train.jsonl").read_text().strip()
-    val = (REPO / "data" / "synth" / "val.jsonl").read_text().strip()
-    combined_path = REPO / "data" / "synth" / "pioneer-upload.jsonl"
-    combined_path.write_text(train + "\n" + val + "\n")
+    """Use the Pioneer-format combined file (output of 08b_convert_to_pioneer.py)."""
+    combined_path = REPO / "data" / "synth" / "pioneer-combined.jsonl"
+    if not combined_path.exists():
+        print(f"  Missing {combined_path}. Run scripts/08b_convert_to_pioneer.py first.", file=sys.stderr)
+        sys.exit(1)
     n = sum(1 for _ in open(combined_path))
-    print(f"  Combined: {n} examples → {combined_path}")
+    print(f"  Pioneer-format file: {n} rows → {combined_path}")
     return combined_path
 
 
@@ -96,9 +96,30 @@ def step3_put_to_s3(presigned_url, file_path):
 def step4_process(dataset_id):
     body = {"dataset_id": dataset_id}
     print(f"  POST /felix/datasets/upload/process body={body}")
-    r = _post("/felix/datasets/upload/process", body)
-    print(f"  → {json.dumps(r)[:300]}")
-    return r
+    for attempt in range(5):
+        try:
+            r = requests.post(
+                f"{API_BASE}/felix/datasets/upload/process",
+                headers={**HEADERS, "Content-Type": "application/json"},
+                json=body,
+                timeout=120,
+            )
+            if r.status_code == 504:
+                print(f"  504 gateway timeout (attempt {attempt+1}/5), backing off…")
+                time.sleep(10 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            data = r.json()
+            print(f"  → {json.dumps(data)[:300]}")
+            return data
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 504:
+                print(f"  504 (attempt {attempt+1}/5), backing off…")
+                time.sleep(10 * (attempt + 1))
+                continue
+            raise
+    print("  ✗ All process attempts failed; checking if dataset processed anyway")
+    return {}
 
 
 def step5_poll_dataset(dataset_name, version, timeout_s=600):
@@ -125,17 +146,25 @@ def step5_poll_dataset(dataset_name, version, timeout_s=600):
     sys.exit(1)
 
 
+PROJECT_ID = os.environ.get("PIONEER_PROJECT_ID", "c2b5c42e-9337-458d-b8fb-2cde67654a18")
+
+
 def step6_create_training_job(dataset_name):
     body = {
         "model_name": MODEL_NAME,
         "datasets": [{"name": dataset_name}],
         "base_model": BASE_MODEL,
-        "training_type": "lora",
+        # CRITICAL: 'full' triggers Pioneer's S3-upload code path; 'lora' only saves locally to /tmp
+        # → MME deploy fails on lora because /s3_models/checkpoints/ stays empty
+        "training_type": "full",
         "validation_data_percentage": 0.15,
-        "nr_epochs": 5,
+        "nr_epochs": 3,
         "learning_rate": 5e-5,
-        "batch_size": 8,
+        "batch_size": 2,
+        "gradient_accumulation_steps": 4,
         "early_stopping_patience": 2,
+        "save_steps": 200,
+        "project_id": PROJECT_ID,
     }
     print(f"  POST /felix/training-jobs body={json.dumps(body, indent=2)}")
     r = _post("/felix/training-jobs", body)
@@ -222,19 +251,19 @@ def main():
     print("\n[8] List checkpoints")
     cps = step8_list_checkpoints(job_id)
 
-    print("\n[9] Deploy best checkpoint")
-    if isinstance(cps, list) and cps:
-        # Pick last (typically best with early-stop)
-        cp = cps[-1]
-        cp_id = cp.get("id") or cp.get("checkpoint_id")
-        if cp_id:
-            deploy_info = step9_deploy_checkpoint(job_id, cp_id)
-            print("\n=== DEPLOYED ===")
-            print(json.dumps(deploy_info, indent=2))
-        else:
-            print(f"  ✗ No checkpoint_id in {cp}", file=sys.stderr)
+    print("\n[9] Deploy via NEW project-based endpoint")
+    deploy_resp = requests.post(
+        f"{API_BASE}/projects/{PROJECT_ID}/deployments",
+        headers={**HEADERS, "Content-Type": "application/json"},
+        json={"training_job_id": job_id, "reason": f"BBH Inazuma fine-tune {MODEL_NAME}"},
+        timeout=60,
+    )
+    print(f"  POST /projects/{PROJECT_ID}/deployments -> HTTP {deploy_resp.status_code}")
+    if deploy_resp.ok:
+        deploy_info = deploy_resp.json()
+        print(json.dumps(deploy_info, indent=2)[:2000])
     else:
-        print(f"  No checkpoints listed: {cps}", file=sys.stderr)
+        print(f"  body: {deploy_resp.text[:1000]}")
 
     # Save manifest
     manifest = {

@@ -29,7 +29,6 @@ from ft_common import (
     GOOGLE_CLOUD_PROJECT,
     LABEL_DESCRIPTIONS,
     LABELS,
-    PIONEER_FIELD_SPEC,
     PIONEER_KEY,
     PIONEER_URL,
     load_jsonl,
@@ -37,6 +36,7 @@ from ft_common import (
 )
 
 OURS_URL = os.environ.get("GLINER_FT_ENDPOINT", "")
+PIONEER_FT_MODEL_ID = os.environ.get("PIONEER_FT_MODEL_ID", "29473289-ef37-4dc7-ae00-068ff38ee298")
 
 
 def label_str():
@@ -116,6 +116,34 @@ def ours_predict(text: str):
     r = requests.post(OURS_URL, json={"text": text, "labels": LABELS, "threshold": 0.4}, timeout=30)
     r.raise_for_status()
     return r.json().get("spans", [])
+
+
+def pioneer_ft_predict(text: str):
+    """Inference via our Pioneer-deployed fine-tuned model (training_job_id)."""
+    body = {
+        "model_id": PIONEER_FT_MODEL_ID,
+        "task": "extract_entities",
+        "text": text,
+        "schema": list(LABELS),
+        "threshold": 0.4,
+        "include_spans": True,
+    }
+    r = requests.post(
+        "https://api.pioneer.ai/inference",
+        headers={"X-API-Key": PIONEER_KEY, "Content-Type": "application/json"},
+        json=body,
+        timeout=60,
+    )
+    r.raise_for_status()
+    result = r.json().get("result", {})
+    by_label = result.get("entities", {})
+    out = []
+    for lbl in LABELS:
+        for hit in by_label.get(lbl, []) or []:
+            surface = hit.get("text") if isinstance(hit, dict) else str(hit)
+            if surface:
+                out.append({"text": surface, "label": lbl})
+    return out
 
 
 # -------- Metrics --------
@@ -212,11 +240,10 @@ def main():
     systems_to_run = [
         ("Pioneer GLiNER-2 (zero-shot)", pioneer_predict),
         ("Gemini 2.5-flash (frontier)", gemini_predict),
+        ("Ours: Pioneer-deployed (Agent-trained)", pioneer_ft_predict),
     ]
     if OURS_URL:
-        systems_to_run.append(("Ours (GLiNER-2 fine-tuned)", ours_predict))
-    else:
-        print("⚠ GLINER_FT_ENDPOINT not set — skipping our model. Set after Modal deploy.")
+        systems_to_run.append(("Ours: Modal (open gliner_large-v2.1, ours params)", ours_predict))
 
     results = {"gold_count": len(gold_rows), "systems": []}
     for name, fn in systems_to_run:
