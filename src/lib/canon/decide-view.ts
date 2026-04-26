@@ -52,6 +52,13 @@ export interface DecisionCard {
   /** The role this metric escalates to under current policy. */
   escalationRole: EscalationRole;
   authorityEmail: string;
+  /**
+   * How many of the candidate sources expose a human author in their sourceRef.
+   * Drives whether "Ask source-authors" or "Escalate directly" is the right CTA.
+   */
+  authorAvailability: 'all' | 'partial' | 'none';
+  authorCount: number;
+  totalCandidates: number;
 }
 
 export interface DecisionInbox {
@@ -132,6 +139,12 @@ export async function loadDecisionInbox(
     if (thread?.stage === 'resolved') continue; // already done
 
     const role = routeMetricToRole(metric.key);
+    const authorCount = metric.active.filter(
+      (f) => parseSourceAuthor(f.sourceRef) !== null,
+    ).length;
+    const total = metric.active.length;
+    const authorAvailability: 'all' | 'partial' | 'none' =
+      authorCount === 0 ? 'none' : authorCount === total ? 'all' : 'partial';
     cards.push({
       entity: entity.slug,
       entityDisplay: entity.displayName,
@@ -141,16 +154,29 @@ export async function loadDecisionInbox(
       thread,
       escalationRole: role,
       authorityEmail: emailForRole(role),
+      authorAvailability,
+      authorCount,
+      totalCandidates: total,
     });
   }
 
-  // Stable sort: cards with a live thread first (most "interesting" for demo).
-  cards.sort((a, b) => stageRank(b.thread?.stage) - stageRank(a.thread?.stage));
+  // Sort: cards with active threads first (interesting for demo), then by
+  // author availability ('all' > 'partial' > 'none'). Authored cards rank
+  // top so the audience hits the working ask-source-authors path first.
+  cards.sort((a, b) => {
+    const stageDiff = stageRank(b.thread?.stage) - stageRank(a.thread?.stage);
+    if (stageDiff !== 0) return stageDiff;
+    return authorRank(b.authorAvailability) - authorRank(a.authorAvailability);
+  });
 
   // myAsks is populated by the caller via loadOpenAuthorAsks on the page;
   // we leave it empty here so the inbox query stays a single round-trip.
   void userEmail;
   return { cards, count: cards.length, myAsks: [] };
+}
+
+function authorRank(a: 'all' | 'partial' | 'none'): number {
+  return a === 'all' ? 2 : a === 'partial' ? 1 : 0;
 }
 
 function stageRank(stage: DecisionStage | undefined): number {

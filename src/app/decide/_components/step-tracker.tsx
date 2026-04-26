@@ -9,6 +9,8 @@ import type { DecisionStage } from '@/lib/canon/decide-view';
 
 interface StepTrackerProps {
   stage: DecisionStage;
+  /** When true, the "Asked authors" dot renders as skipped (struck through). */
+  skipAsk?: boolean;
 }
 
 const DOTS = [
@@ -51,24 +53,31 @@ function lineClass(beforeIdx: number, active: number): string {
     : 'bg-zinc-200 dark:bg-zinc-700';
 }
 
-export function StepTracker({ stage }: StepTrackerProps) {
+export function StepTracker({ stage, skipAsk = false }: StepTrackerProps) {
   const active = activeIndex(stage);
   return (
     <div className="flex items-center gap-1 py-2">
-      {DOTS.map((d, i) => (
-        <div key={d.key} className="flex flex-1 items-center gap-1">
-          <div
-            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold ${dotClass(i, active, stage)}`}
-            aria-label={d.label}
-            title={d.label}
-          >
-            {i < active ? '✓' : i === active && stage === 'resolved' ? '✓' : i + 1}
+      {DOTS.map((d, i) => {
+        const isAskDot = d.key === 'ask';
+        const skipped = isAskDot && skipAsk && active <= 1;
+        const cls = skipped
+          ? 'bg-zinc-200 border-zinc-300 text-zinc-500 line-through dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-500'
+          : dotClass(i, active, stage);
+        return (
+          <div key={d.key} className="flex flex-1 items-center gap-1">
+            <div
+              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold ${cls}`}
+              aria-label={skipped ? `${d.label} (skipped)` : d.label}
+              title={skipped ? `${d.label} (skipped — no human authors)` : d.label}
+            >
+              {skipped ? '–' : i < active ? '✓' : i === active && stage === 'resolved' ? '✓' : i + 1}
+            </div>
+            {i < DOTS.length - 1 && (
+              <div className={`h-0.5 flex-1 ${lineClass(i, active)}`} />
+            )}
           </div>
-          {i < DOTS.length - 1 && (
-            <div className={`h-0.5 flex-1 ${lineClass(i, active)}`} />
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

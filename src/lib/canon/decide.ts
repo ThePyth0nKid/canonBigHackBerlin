@@ -132,15 +132,21 @@ export async function askSourceAuthors(
   if (addressees.length === 0) {
     return {
       ok: false,
-      reason: 'no source-authors found in conflicting facts (sourceRef has no #u= or #from= suffix)',
+      reason:
+        'no_human_authors: this conflict only has automated sources (Slack/Gmail authors absent). Use Escalate Directly to route to the policy authority.',
     };
   }
+  // Partial-author tolerance: some sources have humans, some don't.
+  // We ping the humans we have; the audit trail records which were unaskable.
+  const unaskable = facts
+    .filter((f) => !addressees.some((a) => a.factId === f.id))
+    .map((f) => f.id);
 
   const parentHash = await refreshTail(userId, workspace);
   const askFactId = newFactId('ask');
   const claim = `Clarification request: ${entity}.${metricKey} — competing claims (${facts
     .map((f) => f.metricValue ?? '?')
-    .join(' vs ')}). Pinged ${addressees.length} source-author(s).`;
+    .join(' vs ')}). Pinged ${addressees.length} of ${facts.length} candidate source(s)${unaskable.length > 0 ? ` — ${unaskable.length} automated source(s) had no human author` : ''}.`;
   const sourceRef = `decide:ask:${threadId}`;
   const notes = [
     `decide:thread=${threadId}`,
@@ -149,6 +155,7 @@ export async function askSourceAuthors(
     `entity=${entity}`,
     `conflictFacts=${conflictFactIds.join(',')}`,
     `addressees=${addressees.map((a) => `${a.kind}:${a.id}`).join(',')}`,
+    unaskable.length > 0 ? `unaskable=${unaskable.join(',')}` : 'unaskable=',
   ].join(':');
 
   const signer = new CanonSigner();
@@ -429,6 +436,160 @@ export async function escalateToAuthority(
   revalidatePath('/decide');
   revalidatePath('/app');
   return { ok: true, escalationFactId, role, authorityEmail };
+}
+
+// ============================================================
+// Stage 2 (alt): escalateDirectly — for conflicts whose sources are
+// purely automated (qontext catalog, sales data, invoices) and have
+// no human author to ask. Skips Stage 1, opens a fresh thread anchored
+// on a synthetic ask-skipped event so the chain still walks cleanly.
+// ============================================================
+
+export interface EscalateDirectArgs {
+  userId: string;
+  entity: string;
+  metricKey: string;
+  conflictFactIds: string[];
+}
+
+export async function escalateDirectly(
+  args: EscalateDirectArgs,
+): Promise<EscalateResult & { threadId?: string }> {
+  const { userId, entity, metricKey, conflictFactIds } = args;
+  if (conflictFactIds.length < 2) {
+    return { ok: false, reason: 'need at least 2 conflicting facts' };
+  }
+
+  const facts = await prisma.factEvent.findMany({
+    where: { id: { in: conflictFactIds }, userId, status: 'active' },
+    select: { id: true, workspace: true, sourceRef: true, metricValue: true },
+  });
+  if (facts.length < 2) return { ok: false, reason: 'facts not found' };
+  const workspace = facts[0].workspace;
+  if (facts.some((f) => f.workspace !== workspace)) {
+    return { ok: false, reason: 'cross-workspace conflict' };
+  }
+
+  // Idempotency: reuse an open thread if one exists for this (entity, metricKey).
+  const open = await findOpenThread(userId, workspace, entity, metricKey);
+  let threadId = open?.threadId;
+
+  if (!threadId) {
+    threadId = newThreadId();
+    // Write a synthetic "ask-skipped" event so loadDecisionThread / lineage
+    // walks have an anchor with the same shape as a real ask.
+    const parentHash = await refreshTail(userId, workspace);
+    const askSkippedFactId = newFactId('askSkip');
+    const claim = `Ask-source-authors skipped: ${entity}.${metricKey} — all ${facts.length} sources are automated (no human author). Routing straight to authority.`;
+    const sourceRef = `decide:ask:${threadId}`;
+    const notes = [
+      `decide:thread=${threadId}`,
+      `stage=asked`,
+      `metricKey=${metricKey}`,
+      `entity=${entity}`,
+      `conflictFacts=${conflictFactIds.join(',')}`,
+      `addressees=`,
+      `unaskable=${conflictFactIds.join(',')}`,
+      `skipped=no_human_authors`,
+    ].join(':');
+    const signer = new CanonSigner();
+    signer.start();
+    let signRes;
+    try {
+      signRes = await signer.sign({
+        factId: askSkippedFactId,
+        entity,
+        claim,
+        sourceRef,
+        sourceExcerpt: claim,
+        parentHash,
+        createdAtMs: Date.now(),
+      });
+    } finally {
+      await signer.close();
+    }
+    await prisma.factEvent.create({
+      data: {
+        id: askSkippedFactId,
+        userId,
+        workspace,
+        entity,
+        claim,
+        metricKey,
+        metricValue: null,
+        metricUnit: null,
+        sourceRef,
+        sourceExcerpt: claim,
+        parentHash: parentHash || null,
+        eventHash: signRes.eventHash,
+        coseSign1Hex: signRes.coseSign1Hex,
+        signerPubkey: signRes.signerPubkey,
+        signedAt: new Date(signRes.signedAtMs),
+        observedAt: new Date(),
+        status: 'active',
+        notes,
+      },
+    });
+  }
+
+  // Now write the escalation event — same shape as escalateToAuthority.
+  const role = routeMetricToRole(metricKey);
+  const authorityEmail = emailForRole(role);
+  const parentHash = await refreshTail(userId, workspace);
+  const escalationFactId = newFactId('esc');
+  const claim = `Escalated to ${role} (${authorityEmail}): ${entity}.${metricKey} — automated sources only, no human consensus possible.`;
+  const sourceRef = `decide:escalation:${threadId}`;
+  const notes = [
+    `decide:thread=${threadId}`,
+    `stage=escalated`,
+    `role=${role}`,
+    `to=${authorityEmail}`,
+    `via=direct_escalation`,
+  ].join(':');
+
+  const signer = new CanonSigner();
+  signer.start();
+  let signRes;
+  try {
+    signRes = await signer.sign({
+      factId: escalationFactId,
+      entity,
+      claim,
+      sourceRef,
+      sourceExcerpt: claim,
+      parentHash,
+      createdAtMs: Date.now(),
+    });
+  } finally {
+    await signer.close();
+  }
+
+  await prisma.factEvent.create({
+    data: {
+      id: escalationFactId,
+      userId,
+      workspace,
+      entity,
+      claim,
+      metricKey,
+      metricValue: null,
+      metricUnit: null,
+      sourceRef,
+      sourceExcerpt: claim,
+      parentHash: parentHash || null,
+      eventHash: signRes.eventHash,
+      coseSign1Hex: signRes.coseSign1Hex,
+      signerPubkey: signRes.signerPubkey,
+      signedAt: new Date(signRes.signedAtMs),
+      observedAt: new Date(),
+      status: 'active',
+      notes,
+    },
+  });
+
+  revalidatePath('/decide');
+  revalidatePath('/app');
+  return { ok: true, escalationFactId, role, authorityEmail, threadId };
 }
 
 // ============================================================

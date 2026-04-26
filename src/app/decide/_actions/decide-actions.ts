@@ -5,6 +5,7 @@ import {
   askSourceAuthors as askCore,
   recordResponse as respondCore,
   escalateToAuthority as escalateCore,
+  escalateDirectly as escalateDirectCore,
   resolveByAuthority as resolveCore,
   type ResponseChoice,
 } from '@/lib/canon/decide';
@@ -60,6 +61,26 @@ export async function escalateAction(input: { threadId: string }) {
   const me = await requireUser();
   if (!me) return { ok: false as const, reason: 'auth' };
   return escalateCore({ userId: me.userId, threadId: input.threadId });
+}
+
+/**
+ * Direct escalation for conflicts whose sources are all automated (no human
+ * author to ask). Skips Stage 1 and routes straight to the policy authority,
+ * still anchored on a synthetic ask-skipped event so the chain walks cleanly.
+ */
+export async function escalateDirectlyAction(input: {
+  entity: string;
+  metricKey: string;
+  conflictFactIds: string[];
+}) {
+  const me = await requireUser();
+  if (!me) return { ok: false as const, reason: 'auth' };
+  return escalateDirectCore({
+    userId: me.userId,
+    entity: input.entity,
+    metricKey: input.metricKey,
+    conflictFactIds: input.conflictFactIds,
+  });
 }
 
 export async function resolveByAuthorityAction(input: {

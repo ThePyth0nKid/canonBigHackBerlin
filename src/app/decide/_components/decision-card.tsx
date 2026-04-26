@@ -4,6 +4,7 @@ import { useState, useTransition } from 'react';
 import {
   askSourceAuthorsAction,
   escalateAction,
+  escalateDirectlyAction,
   resolveByAuthorityAction,
 } from '../_actions/decide-actions';
 import { StepTracker, StageBadge } from './step-tracker';
@@ -11,7 +12,7 @@ import type { DecisionCard as Card } from '@/lib/canon/decide-view';
 
 interface Props {
   card: Card;
-  /** Email of the signed-in user — used to gate the authority pick UI. */
+  /** Email of the signed-in user — recorded on the resolution event. */
   viewerEmail: string;
 }
 
@@ -23,7 +24,9 @@ export function DecisionCard({ card, viewerEmail }: Props) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const stage = card.thread?.stage ?? 'fresh';
-  const isAuthority = viewerEmail.toLowerCase() === card.authorityEmail.toLowerCase();
+  // V1: workspace owner can act as any authority. Audit trail still records
+  // the logical role. Real per-role auth is V2.
+  void viewerEmail;
 
   function onAsk() {
     setError(null);
@@ -37,11 +40,23 @@ export function DecisionCard({ card, viewerEmail }: Props) {
     });
   }
 
-  function onEscalate() {
+  function onEscalateThread() {
     if (!card.thread?.threadId) return;
     setError(null);
     startTransition(async () => {
       const r = await escalateAction({ threadId: card.thread!.threadId });
+      if (!r.ok) setError(r.reason ?? 'escalate failed');
+    });
+  }
+
+  function onEscalateDirect() {
+    setError(null);
+    startTransition(async () => {
+      const r = await escalateDirectlyAction({
+        entity: card.entity,
+        metricKey: card.metricKey,
+        conflictFactIds: card.candidates.map((c) => c.id),
+      });
       if (!r.ok) setError(r.reason ?? 'escalate failed');
     });
   }
@@ -65,6 +80,10 @@ export function DecisionCard({ card, viewerEmail }: Props) {
     candidatesByValue.get(k)!.push(c);
   }
 
+  const noAuthors = card.authorAvailability === 'none';
+  const partialAuthors = card.authorAvailability === 'partial';
+  const showPickUI = stage === 'escalated';
+
   return (
     <article className="rounded-xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
       <header className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
@@ -79,7 +98,7 @@ export function DecisionCard({ card, viewerEmail }: Props) {
         <StageBadge stage={stage} />
       </header>
 
-      <StepTracker stage={stage} />
+      <StepTracker stage={stage} skipAsk={noAuthors} />
 
       <div className="mt-3 space-y-2">
         <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
@@ -103,7 +122,7 @@ export function DecisionCard({ card, viewerEmail }: Props) {
                 <span className="font-mono text-[10px] uppercase text-zinc-500">
                   {[...new Set(facts.map((f) => sourceKindOf(f.sourceRef)))].join(' · ')}
                 </span>
-                {stage === 'escalated' && isAuthority && (
+                {showPickUI && (
                   <button
                     type="button"
                     disabled={pending}
@@ -140,35 +159,56 @@ export function DecisionCard({ card, viewerEmail }: Props) {
         <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-[12px] dark:border-rose-900 dark:bg-rose-950">
           Escalated to <strong>{card.thread.escalation.role}</strong> ·{' '}
           <span className="font-mono">{card.thread.escalation.authorityEmail}</span>
-          {!isAuthority && (
-            <p className="mt-1 text-[11px] text-rose-700 dark:text-rose-300">
-              Awaiting authority decision. (Sign in as the authority to pick.)
-            </p>
-          )}
         </div>
       )}
 
       <footer className="mt-4 flex flex-wrap items-center justify-between gap-2">
-        <p className="text-[11px] text-zinc-500">
-          Routes to <span className="font-medium">{card.escalationRole}</span> ·{' '}
-          <span className="font-mono">{card.authorityEmail}</span>
-        </p>
+        <div className="flex flex-col gap-0.5">
+          <p className="text-[11px] text-zinc-500">
+            Routes to <span className="font-medium">{card.escalationRole}</span> ·{' '}
+            <span className="font-mono">{card.authorityEmail}</span>
+          </p>
+          {noAuthors && stage === 'fresh' && (
+            <p className="text-[10px] uppercase tracking-wide text-zinc-400">
+              automated sources only — no human author to ask
+            </p>
+          )}
+          {partialAuthors && stage === 'fresh' && (
+            <p className="text-[10px] uppercase tracking-wide text-zinc-400">
+              {card.authorCount} of {card.totalCandidates} sources have a human author
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-2">
-          {stage === 'fresh' && (
+          {stage === 'fresh' && !noAuthors && (
             <button
               type="button"
               disabled={pending}
               onClick={onAsk}
               className="rounded-md bg-sky-600 px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-sky-500 disabled:opacity-50"
             >
-              {pending ? 'Asking…' : 'Ask source-authors'}
+              {pending
+                ? 'Asking…'
+                : partialAuthors
+                  ? `Ask ${card.authorCount} author${card.authorCount === 1 ? '' : 's'}`
+                  : 'Ask source-authors'}
+            </button>
+          )}
+          {stage === 'fresh' && noAuthors && (
+            <button
+              type="button"
+              disabled={pending}
+              onClick={onEscalateDirect}
+              className="rounded-md bg-amber-600 px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-amber-500 disabled:opacity-50"
+            >
+              {pending ? 'Escalating…' : `Escalate directly to ${card.escalationRole}`}
             </button>
           )}
           {(stage === 'diverged' || stage === 'asked' || stage === 'partial_response') && (
             <button
               type="button"
               disabled={pending}
-              onClick={onEscalate}
+              onClick={onEscalateThread}
               className="rounded-md bg-amber-600 px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-amber-500 disabled:opacity-50"
             >
               {pending ? 'Escalating…' : 'Escalate'}
