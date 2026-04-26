@@ -20,6 +20,8 @@ import { useState, useTransition } from 'react';
 import { resolveConflict } from '../_actions/resolve';
 import type { ConflictCandidate, InlineConflict } from '@/lib/canon/ask';
 import { BrandChip, brandFor } from './ask-source-brand';
+import { useConfirmStep } from './use-confirm-step';
+import { ConfirmSignRow } from './confirm-sign-row';
 
 type FightOutcome =
   | { kind: 'canonical'; winnerFactId: string; superseded: number; resolutionFactId: string }
@@ -41,14 +43,18 @@ export function AskFightCard({
   const [pending, start] = useTransition();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const confirm = useConfirmStep(1500);
 
   const allFactIds = conflict.candidates.map((c) => c.factId);
   const visible = showAll
     ? conflict.candidates
     : conflict.candidates.slice(0, CANDIDATES_VISIBLE);
   const hidden = conflict.candidates.length - visible.length;
+  // Server supersedes every active competing fact except the winner.
+  const otherActiveCount = Math.max(0, conflict.candidates.length - 1);
 
   function pickCanonical(winnerFactId: string) {
+    confirm.cancel();
     setError(null);
     setPendingId(winnerFactId);
     start(async () => {
@@ -79,6 +85,7 @@ export function AskFightCard({
   }
 
   function markDistinct() {
+    confirm.cancel();
     setError(null);
     setPendingId('__distinct__');
     start(async () => {
@@ -157,7 +164,12 @@ export function AskFightCard({
             isLoser={!!winnerFactId && winnerFactId !== cand.factId}
             isPending={pending && pendingId === cand.factId}
             disabled={pending || resolved}
-            onPick={() => pickCanonical(cand.factId)}
+            isArmed={confirm.isArmed(cand.factId)}
+            isReady={confirm.isReady(cand.factId)}
+            consequence={`This becomes Source of Truth for ${conflict.entityDisplay} · ${conflict.metricKey}. ${otherActiveCount} other candidate${otherActiveCount === 1 ? '' : 's'} flip to superseded. Signed + permanent on the audit chain (admin reverse required to undo).`}
+            onArm={() => confirm.arm(cand.factId)}
+            onConfirm={() => pickCanonical(cand.factId)}
+            onCancel={confirm.cancel}
           />
         ))}
       </ul>
@@ -175,22 +187,33 @@ export function AskFightCard({
       {/* FOOTER — secondary action (distinct) and outcome / error. Distinct
           intentionally tertiary because in 95% of cases the user wants to
           pick a winner; the modal flow handles the long tail. */}
-      {!resolved && (
+      {!resolved && !confirm.isArmed('__distinct__') && (
         <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 bg-zinc-50/60 px-4 py-2 dark:border-zinc-900 dark:bg-zinc-900/30">
           <p className="font-mono text-[10px] text-zinc-500">
             None of these are wrong? Mark them as independent records.
           </p>
           <button
             type="button"
-            onClick={markDistinct}
+            onClick={() => confirm.arm('__distinct__')}
             disabled={pending}
             className="inline-flex h-7 items-center justify-center rounded-full border border-sky-400 bg-white px-3 font-mono text-[10px] font-semibold uppercase tracking-wider text-sky-800 transition-colors hover:bg-sky-50 disabled:opacity-60 dark:border-sky-600 dark:bg-zinc-950 dark:text-sky-200 dark:hover:bg-sky-950/60"
           >
-            {pending && pendingId === '__distinct__'
-              ? 'signing…'
-              : 'Mark as distinct'}
+            Mark as distinct
           </button>
         </footer>
+      )}
+
+      {!resolved && confirm.isArmed('__distinct__') && (
+        <div className="border-t border-zinc-100 bg-zinc-50/60 px-4 py-3 dark:border-zinc-900 dark:bg-zinc-900/30">
+          <ConfirmSignRow
+            consequence={`Sign acknowledgement that ${allFactIds.length} candidate fact${allFactIds.length === 1 ? '' : 's'} are independent records (none gets superseded). Signed + permanent on the audit chain.`}
+            ready={confirm.isReady('__distinct__')}
+            pending={pending && pendingId === '__distinct__'}
+            onConfirm={markDistinct}
+            onCancel={confirm.cancel}
+            variant="distinct"
+          />
+        </div>
       )}
 
       {outcome && (
@@ -224,14 +247,24 @@ function CandidateRow({
   isLoser,
   isPending,
   disabled,
-  onPick,
+  isArmed,
+  isReady,
+  consequence,
+  onArm,
+  onConfirm,
+  onCancel,
 }: {
   cand: ConflictCandidate;
   isWinner: boolean;
   isLoser: boolean;
   isPending: boolean;
   disabled: boolean;
-  onPick: () => void;
+  isArmed: boolean;
+  isReady: boolean;
+  consequence: string;
+  onArm: () => void;
+  onConfirm: () => void;
+  onCancel: () => void;
 }) {
   const b = brandFor(cand.sourceRef);
   const tone = isWinner
@@ -280,8 +313,9 @@ function CandidateRow({
       </div>
 
       {/* CTA — visually dominant; the entire row's job. Hidden when a
-          winner has already been chosen for this card. */}
-      <div className="flex-shrink-0 self-center">
+          winner has already been chosen for this card. Armed state takes
+          over the full right column with the inline confirm strip. */}
+      <div className={`self-center ${isArmed ? 'w-full sm:w-[18rem] sm:flex-shrink-0' : 'flex-shrink-0'}`}>
         {isWinner ? (
           <span className="inline-flex h-9 items-center justify-center gap-1.5 rounded-full bg-emerald-600 px-4 font-mono text-[11px] font-semibold uppercase tracking-wider text-white dark:bg-emerald-500">
             <svg
@@ -299,14 +333,22 @@ function CandidateRow({
             </svg>
             canonical
           </span>
+        ) : isArmed ? (
+          <ConfirmSignRow
+            consequence={consequence}
+            ready={isReady}
+            pending={isPending}
+            onConfirm={onConfirm}
+            onCancel={onCancel}
+          />
         ) : (
           <button
             type="button"
-            onClick={onPick}
+            onClick={onArm}
             disabled={disabled}
             className="inline-flex h-9 items-center justify-center rounded-full bg-zinc-950 px-4 text-[11px] font-semibold text-white shadow-sm transition-colors hover:bg-zinc-800 disabled:opacity-50 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
           >
-            {isPending ? 'signing…' : 'Sign as canonical'}
+            Sign as canonical
           </button>
         )}
       </div>
