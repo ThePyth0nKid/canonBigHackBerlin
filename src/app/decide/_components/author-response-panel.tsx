@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
 import { recordResponseAction } from '../_actions/decide-actions';
 import type { AuthorAsk } from '@/lib/canon/decide-view';
 
@@ -38,6 +39,9 @@ export function AuthorResponsePanel({
 }: Props) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  // revalidatePath('/decide') runs server-side; router.refresh() makes the
+  // client refetch the server component so the answered ask disappears.
+  const router = useRouter();
 
   function onPick(args: {
     threadId: string;
@@ -54,6 +58,7 @@ export function AuthorResponsePanel({
         respondingAs: args.respondingAs,
       });
       if (!r.ok) setError(r.reason ?? 'response failed');
+      else router.refresh();
     });
   }
 

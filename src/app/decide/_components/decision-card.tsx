@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   askSourceAuthorsAction,
   escalateAction,
@@ -54,6 +55,11 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(focusedFromMagicLink);
+  // Server actions call revalidatePath('/decide'), but with onClick + useTransition
+  // (vs <form action>) the App Router doesn't auto-refetch the server component.
+  // We call router.refresh() explicitly so the just-resolved card disappears
+  // and the inbox count updates without a manual reload.
+  const router = useRouter();
   const stage = card.thread?.stage ?? 'fresh';
   void viewerEmail;
 
@@ -66,6 +72,7 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
         conflictFactIds: card.candidates.map((c) => c.id),
       });
       if (!r.ok) setError(r.reason ?? 'ask failed');
+      else router.refresh();
     });
   }
 
@@ -75,6 +82,7 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
     startTransition(async () => {
       const r = await escalateAction({ threadId: card.thread!.threadId });
       if (!r.ok) setError(r.reason ?? 'escalate failed');
+      else router.refresh();
     });
   }
 
@@ -87,6 +95,7 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
         conflictFactIds: card.candidates.map((c) => c.id),
       });
       if (!r.ok) setError(r.reason ?? 'escalate failed');
+      else router.refresh();
     });
   }
 
@@ -99,6 +108,7 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
         winnerFactId,
       });
       if (!r.ok) setError(r.reason ?? 'resolve failed');
+      else router.refresh();
     });
   }
 
@@ -112,6 +122,7 @@ export function DecisionCard({ card, viewerEmail, focusedFromMagicLink = false }
         winnerFactId,
       });
       if (!r.ok) setError('decide failed');
+      else router.refresh();
     });
   }
 
