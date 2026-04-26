@@ -100,19 +100,28 @@ export interface CanonAnswer {
 
 const SYSTEM_PROMPT = `You answer business questions using ONLY the signed Canon facts in the user message.
 
-Hard rules:
-- Every quantitative claim or named entity in your answer MUST be backed by an inline citation in the form [f_XXXXX] where f_XXXXX is a factId from the list provided.
+Citation format (HARD RULES — no exceptions):
+- Every quantitative claim or named entity MUST be backed by EXACTLY ONE inline citation in the form [f_XXXXX] where f_XXXXX is a factId from the list provided.
+- NEVER put multiple factIds in a single bracket. Write [f_A] not [f_A, f_B, f_C]. The UI renders single brackets as clickable pills; multi-id brackets render as broken plain text.
+- Maximum 2 citations per sentence or list-item. Pick the strongest evidence; the citation cards below the answer surface the full set.
+
+Output structure:
+- For list-shape questions ("which X have Y", "what are the top N", "list the …") — use a markdown bullet list with ONE ITEM PER LINE. Format: "- <Subject>: <value> · <N facts agree> [f_X]". Newline-separate items so the user can scan.
+- For single-fact questions — 1-2 sentences, plain prose.
+- For conflict questions — surface the divergence on its own line: "Miller Group has 2 competing industries: Manufacturing [f_A] vs Entertainment [f_B]."
+
+Content rules:
 - DO NOT invent facts not in the list. If the available facts don't answer the question, say so explicitly and suggest a more specific question.
-- Be terse. 1–4 sentences. Plain language. No emojis.
-- If a fact is annotated [N facts agree], that means N independent signed facts in the ledger share the same value — surface this explicitly in the answer ("18 facts agree on price ₹1999 [f_…]") because cluster size is the load-bearing trust signal.
-- If a fact is annotated [conflict: N distinct values], surface that explicitly: "Miller Group has N competing industries, [f_A]=Manufacturing vs [f_B]=Entertainment".
-- If the user asks for cryptographic proof / source, point them at the cited factId and remind them they can call canon_cite for the COSE_Sign1 envelope.
-- Match the user's language: if they asked in German, answer in German; if in English, English.
+- If a fact is annotated [N facts agree], surface the count: "18 facts agree on ₹1999 [f_…]". Cluster size is the load-bearing trust signal.
+- If a fact is annotated [conflict: N distinct values], surface "N competing values" verbatim.
+- For SKU-shaped entity slugs (B0XXXXX, prefix B0, ten-char alphanumeric) wrap in inline code: \`B0B15CPR37\`. They are not human-readable names; don't treat them as such.
+- If the user asks for cryptographic proof / source, point at the cited factId and remind them they can call canon_cite for the COSE_Sign1 envelope.
+- Match the user's language: if they asked in German, answer in German; if in English, English. No emojis.
 
 Output JSON:
 {"answer": string, "citedFactIds": string[], "confidence": "high" | "medium" | "low"}
 
-"citedFactIds" must be a deduplicated list of every f_XXX appearing in "answer". The system will validate them against the retrieved set; ids that don't match get dropped.`;
+"citedFactIds" must be a deduplicated list of every f_XXX appearing in "answer". Validation drops ids not in the retrieved set.`;
 
 const RESPONSE_SCHEMA = {
   type: Type.OBJECT,
@@ -290,6 +299,15 @@ export async function askCanon(args: {
     };
   }
 
+  // Defence-in-depth: even with the system prompt forbidding multi-id
+  // brackets and capping citations, Gemini occasionally emits
+  // [f_A, f_B, f_C, f_D, f_E] on list-shape answers. The UI's
+  // CITATION_RE matches single-id brackets; multi-id ones render as raw
+  // plain text — ugly factId strings in the prose. Normalise here so
+  // the inline answer is human-scannable regardless of model behaviour.
+  parsed.answer = normalizeMultiIdBrackets(parsed.answer);
+  parsed.answer = capCitationsPerLine(parsed.answer, 2);
+
   // Filter cited ids against retrieved set so the UI never renders a link
   // to a fact the model hallucinated.
   const validIds = new Set(candidates.map((c) => c.factId));
@@ -394,4 +412,54 @@ function buildConflictCards(rows: CanonCitation[]): InlineConflict[] {
     });
   }
   return out;
+}
+
+/**
+ * Split `[f_A, f_B, f_C]` style multi-id citation brackets into
+ * `[f_A] [f_B] [f_C]` so the UI's CITATION_RE (matches single-id
+ * `[f_xxx]` only) renders each as its own clickable pill instead of
+ * leaving the raw factId string in the prose.
+ *
+ * Tolerates whitespace variations and validates each id matches the
+ * `f_<alphanumeric>` shape — anything else is dropped (defence against
+ * a malformed bracket leaking junk into the rendered answer).
+ */
+function normalizeMultiIdBrackets(text: string): string {
+  return text.replace(/\[([^\]]+)\]/g, (full, body: string) => {
+    // Only act on bodies that look like a list of factIds. Leave other
+    // bracketed text (e.g. annotations, footnotes) untouched.
+    if (!/^\s*f_[A-Za-z0-9]+\s*(,\s*f_[A-Za-z0-9]+\s*)+$/.test(body)) {
+      return full;
+    }
+    const ids = body
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => /^f_[A-Za-z0-9]+$/.test(s));
+    return ids.map((id) => `[${id}]`).join(' ');
+  });
+}
+
+/**
+ * Cap inline citations per line to `maxPerLine`. Excess citations are
+ * stripped; the citation cards below the answer still surface the full
+ * set, so no information is lost — just the visual noise.
+ *
+ * Operates line-by-line so a list answer with 6 items each carrying
+ * one citation stays intact, while a single sentence with 5 piled-up
+ * citations gets trimmed to 2.
+ */
+function capCitationsPerLine(text: string, maxPerLine: number): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      let kept = 0;
+      const cleaned = line.replace(/\[(f_[A-Za-z0-9]+)\]/g, (m) => {
+        kept += 1;
+        return kept <= maxPerLine ? m : '';
+      });
+      // Tidy double-spaces left behind by stripped citations + spaces
+      // before punctuation.
+      return cleaned.replace(/[ \t]{2,}/g, ' ').replace(/ +([.,;:])/g, '$1');
+    })
+    .join('\n');
 }
