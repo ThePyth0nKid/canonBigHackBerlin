@@ -27,7 +27,9 @@
 
 import { useState, useTransition } from 'react';
 import { askCanonAction } from '../_actions/ask-canon';
+import { searchWebContextAction } from '../_actions/web-context';
 import type { CanonAnswer, CanonCitation } from '@/lib/canon/ask';
+import type { CachedExternalResult } from '@/lib/canon/web-context';
 import { AskFightCard } from './ask-fight-card';
 import { BrandChip, brandFor } from './ask-source-brand';
 
@@ -145,12 +147,12 @@ export function AskCanon() {
         </div>
       )}
 
-      {answer && !pending && <AnswerBlock answer={answer} />}
+      {answer && !pending && <AnswerBlock answer={answer} question={question} />}
     </div>
   );
 }
 
-function AnswerBlock({ answer }: { answer: CanonAnswer }) {
+function AnswerBlock({ answer, question }: { answer: CanonAnswer; question: string }) {
   const tone =
     answer.confidence === 'high'
       ? {
@@ -234,6 +236,12 @@ function AnswerBlock({ answer }: { answer: CanonAnswer }) {
           </div>
         </section>
       )}
+
+      {/* ZONE 5 — UNSIGNED public-web context. User-triggered. Trust gradient
+          made explicit — sky-blue card under the signed answer, every Tavily
+          item carries an unsigned badge. Closes the "I cannot answer" hole
+          without polluting the signed ledger or the trust narrative. */}
+      <ExternalContextSection question={question} />
     </div>
   );
 }
@@ -447,5 +455,159 @@ function CitationCard({ index, cite }: { index: number; cite: CanonCitation }) {
         factId={cite.factId} · eventHash={cite.eventHash.slice(0, 16)}…
       </p>
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- *
+ * ExternalContextSection — UNSIGNED public-web context (Tavily). User-
+ * triggered "Search web for context →" button under every AskCanon answer.
+ *
+ * Trust gradient is the load-bearing visual: sky-blue panel + UNSIGNED
+ * badges on every item, explicitly contrasted against the signed citations
+ * above. Architectural invariant: every item carries `unsigned: true` from
+ * tavily.ts — UI just surfaces it loudly so the user can never confuse
+ * web hearsay with signed truth.
+ *
+ * Caching + 12/min rate-limit live in src/lib/canon/web-context.ts so this
+ * UI cannot accidentally burn the day's Tavily quota during demo rehearsal.
+ * -------------------------------------------------------------------------- */
+function ExternalContextSection({ question }: { question: string }) {
+  const [data, setData] = useState<CachedExternalResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, start] = useTransition();
+
+  function fetchTavily() {
+    const q = question.trim();
+    if (!q) return;
+    setError(null);
+    start(async () => {
+      const res = await searchWebContextAction({ query: q });
+      if ('error' in res) {
+        setError(res.error);
+      } else {
+        setData(res);
+      }
+    });
+  }
+
+  // Idle state — small button only. Keeps the answer scannable; user opts
+  // in when they want to compare signed vs unsigned for this question.
+  if (!data && !pending && !error) {
+    return (
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={fetchTavily}
+          className="inline-flex items-center gap-1.5 rounded-full border border-sky-300 bg-white px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-wider text-sky-800 transition-colors hover:bg-sky-50 dark:border-sky-700/60 dark:bg-zinc-950 dark:text-sky-200 dark:hover:bg-sky-950/40"
+        >
+          <span aria-hidden>⌕</span>
+          Search web for context (UNSIGNED)
+          <span aria-hidden className="opacity-60">→</span>
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <section className="rounded-2xl border border-sky-300 bg-gradient-to-br from-sky-50 to-white p-4 dark:border-sky-700/50 dark:from-sky-950/30 dark:to-zinc-950">
+      <header className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="flex items-baseline gap-2">
+          <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-sky-700 dark:text-sky-300">
+            external context · Tavily
+          </p>
+          <span className="rounded-full border border-sky-400 bg-sky-100 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-sky-900 dark:border-sky-500 dark:bg-sky-900/40 dark:text-sky-100">
+            UNSIGNED
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setData(null);
+            setError(null);
+          }}
+          className="font-mono text-[10px] uppercase tracking-wider text-sky-700 hover:text-sky-900 dark:text-sky-300 dark:hover:text-sky-100"
+          aria-label="Close external context"
+        >
+          ×
+        </button>
+      </header>
+
+      {pending && (
+        <p className="mt-2 font-mono text-[11px] text-sky-700 dark:text-sky-300">
+          Querying Tavily…
+        </p>
+      )}
+
+      {error && (
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-700/50 dark:bg-rose-950/40 dark:text-rose-200">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={fetchTavily}
+            className="font-mono text-[10px] font-semibold uppercase tracking-wider underline-offset-2 hover:underline"
+          >
+            retry
+          </button>
+        </div>
+      )}
+
+      {data && (
+        <div className="mt-3 space-y-3">
+          {data.synthesis && (
+            <blockquote className="border-l-2 border-sky-400 pl-3 text-sm italic leading-snug text-sky-900 dark:text-sky-100">
+              “{data.synthesis}”
+              <p className="mt-1 not-italic font-mono text-[10px] uppercase tracking-wider text-sky-700/70 dark:text-sky-300/60">
+                Tavily synthesis · {data.latencyMs}ms{data.cached ? ' · cached' : ''}
+              </p>
+            </blockquote>
+          )}
+          {data.items.length === 0 && (
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">
+              Tavily returned no public-web results for this query.
+            </p>
+          )}
+          {data.items.length > 0 && (
+            <ul className="space-y-2">
+              {data.items.slice(0, 5).map((it) => {
+                let host = '';
+                try {
+                  host = new URL(it.url).hostname;
+                } catch {
+                  host = '';
+                }
+                return (
+                  <li
+                    key={it.url}
+                    className="rounded-lg border border-sky-200 bg-white/60 p-2.5 dark:border-sky-800/40 dark:bg-zinc-900/40"
+                  >
+                    <a
+                      href={it.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block text-sm font-medium text-sky-900 hover:underline dark:text-sky-100"
+                    >
+                      {it.title}
+                    </a>
+                    <p className="mt-0.5 line-clamp-2 text-xs leading-snug text-zinc-700 dark:text-zinc-300">
+                      {it.excerpt}
+                    </p>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] text-sky-700 dark:text-sky-400">
+                      <span>{host}</span>
+                      {typeof it.relevance === 'number' && (
+                        <span>· relevance {it.relevance.toFixed(2)}</span>
+                      )}
+                      {it.publishedAt && <span>· {it.publishedAt.slice(0, 10)}</span>}
+                      <span className="rounded border border-sky-400 bg-sky-100 px-1 py-px text-[9px] font-bold uppercase tracking-wider text-sky-900 dark:border-sky-500 dark:bg-sky-900/40 dark:text-sky-100">
+                        unsigned
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
