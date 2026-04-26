@@ -136,33 +136,114 @@ Each workspace has its own hash chain. The MCP server defaults to `inazuma` and 
 
 ---
 
-## MCP integration
+## How agents use Canon (via MCP)
 
-Canon's MCP server exposes **9 tools** to any MCP-compatible agent:
+Canon is an **MCP server** — once mounted, any MCP-compatible agent (Claude Code, Cursor, Windsurf, Zed, Custom Agents) can read and write to the signed ledger as if it were a built-in tool. No prompt-engineering, no embedding-search, no RAG fragility — the agent just calls a tool and gets back signed facts with `[source]`, `[signed]`, `[crypto]` lines it can show the user verbatim.
 
-| Tool                     | Purpose                                                  |
-| ------------------------ | -------------------------------------------------------- |
-| `canon_workspaces`       | List workspaces with active fact counts                  |
-| `canon_lookup`           | Signed facts about an entity (workspace-scoped)          |
-| `canon_search`           | Free-text substring search (workspace-scoped)            |
-| `canon_cite`             | Full COSE_Sign1 audit-chain proof for one factId         |
-| `canon_diff`             | What changed for an entity since an ISO date             |
-| `canon_external_lookup`  | UNSIGNED Tavily web context, side-by-side with signed    |
-| `canon_write`            | Sign a new FactEvent through the shared scan→sign pipeline (`manual:agent-claude:<ISO>` source ref) |
-| `canon_conflicts`        | List open `(entity, metric)` conflicts as a numbered `[1] [2] [3]` picker with `a/b/c` value letters |
-| `canon_resolve`          | Sign a ResolutionEvent at the chain tip (`canonical` pick or `distinct` records) |
+### From Qontext data to agent context — the round-trip
 
-Wire it up:
+Canon's primary workspace is **`inazuma`** — Qontext's enterprise reference dataset (400 clients, 400 vendors, 1260 employees, 11.9k emails, 2.9k conversations, 10.8k internal Q&A). One command pulls it through the four-layer signed pipeline:
 
 ```bash
-claude mcp add --scope user canon -- npx tsx /absolute/path/canon/mcp/canon-mcp.ts
+npx tsx scripts/ingest-qontext.ts --no-audit --reset
 ```
 
-Or copy `mcp/claude-desktop-config.example.json` into `~/Library/Application Support/Claude/claude_desktop_config.json`.
+After the run, ~8800 active FactEvents sit on the chain. From here, the agent's experience is:
+
+```
+human prompt              ──▶  Claude Code / Cursor
+                                     │
+                                     │  (MCP tool call, ~80ms)
+                                     ▼
+                              canon_lookup({entity: "miller_group"})
+                                     │
+                                     │  (signed fact lookup, workspace-scoped)
+                                     ▼
+                          Inazuma.co · miller_group · industry = "Manufacturing"
+                          [source]   qontext:client:c-83af2e1d
+                          [signed]   2026-04-26T13:42Z by ed25519:9c4f...
+                          [crypto]   eventHash 7a3f...8b2c · parentHash 4d1e...
+                          Trust chain: f_drf_… → f_… → f_…
+```
+
+The agent surfaces those last four lines verbatim to the human. **That's the moat:** every answer carries its own audit trail, and no Gemini blip or Claude hallucination can fake the COSE_Sign1 envelope.
+
+### Wire it up (90 seconds)
+
+**Claude Code:**
+```bash
+claude mcp add --scope user canon -- npx tsx /absolute/path/canonBigHackBerlin/mcp/canon-mcp.ts
+claude mcp list                                     # verify "canon: ✓ Connected"
+```
+
+**Claude Desktop / Cursor / Windsurf / Zed** — copy [`mcp/claude-desktop-config.example.json`](./mcp/claude-desktop-config.example.json) into the app's MCP config (`~/Library/Application Support/Claude/claude_desktop_config.json` for Claude Desktop):
+
+```json
+{
+  "mcpServers": {
+    "canon": {
+      "command": "npx",
+      "args": ["tsx", "/absolute/path/canonBigHackBerlin/mcp/canon-mcp.ts"]
+    }
+  }
+}
+```
+
+**Hosted MCP (no local install):** point your agent at `https://canon.ultranova.io/api/mcp` (SSE transport) — same 9 tools, same signed chain, same Qontext-Inazuma workspace.
+
+### The 9 tools, with real Qontext-Inazuma examples
+
+| Tool | When the agent reaches for it | Sample call · what comes back |
+|---|---|---|
+| **`canon_workspaces`** | First call in a fresh session — *"what's available?"* | `→` `[{slug:"inazuma", activeFacts:8846, lastIngest:"2026-04-26T..."}, {slug:"northwind", activeFacts:120}]` |
+| **`canon_lookup`** | *"What do we know about Miller Group?"* — entity by name | `canon_lookup({entity:"miller_group"})` `→` 5 signed claims (industry, primary_contact, monthly_revenue, …) each with `[source]`+`[signed]`+`[crypto]` lines |
+| **`canon_search`** | *"Find anything mentioning ₹1999 in our ledger"* — keyword without entity | `canon_search({query:"Manufacturing"})` `→` top-20 hits across all entities |
+| **`canon_cite`** | *"Prove it. Show the cryptographic chain."* | `canon_cite({factId:"f_drf_8b2c…"})` `→` full COSE_Sign1 hex envelope + signerPubkey + parentHash, ready for offline `canon-verify-wasm` |
+| **`canon_diff`** | *"What changed about Gonzalez Inc since Monday?"* | `canon_diff({entity:"gonzalez_inc", since:"2026-04-22"})` `→` 3 fact-events signed after that date |
+| **`canon_external_lookup`** | *"What does the public web say about Bright Plc?"* — outside Canon | Returns Tavily results tagged `unsigned: true` so the agent (and audit log) sees they're NOT canonical |
+| **`canon_write`** | *"Add a fact: TechCo just churned"* — agent-driven write | Goes through the shared scan → sign pipeline; rejected if PII/secret hits the Aikido gate; returns `factId` + `eventHash` |
+| **`canon_conflicts`** | *"What's tied up in conflicts right now?"* | `→` numbered groups `[1] [2] [3]` with `a/b/c` value letters and ready-to-pass factIds |
+| **`canon_resolve`** | *"Pick the deck-cited value as canonical for Q1 revenue."* | One signed `ResolutionEvent` on the chain tip, plus losers flipped to `superseded`. High-risk metrics auto-trigger the 4-eyes pending path. |
+
+### A real session, end-to-end
+
+This is from a fresh Claude Code terminal, MCP wired, asking about Qontext's `miller_group`:
+
+```
+> What conflicts are open on miller_group?
+
+[Claude Code routes to canon_conflicts({entity: "miller_group"})]
+[3 conflict groups returned: industry · monthly_renewal · primary_contact]
+
+I see 3 open conflicts on miller_group. Pick canonical, mark distinct, or skip:
+
+  ┌─ industry ────────────────────────┐
+  │ [a] Manufacturing       (2 facts) │
+  │ [b] Heavy Industry      (1 fact)  │
+  │ [c] Mark as distinct              │
+  │ [d] Skip                          │
+  └───────────────────────────────────┘
+  ┌─ primary_contact ─────────────────┐
+  │ [a] Mary Smith          (3 facts) │
+  │ [b] Mark Sullivan       (1 fact)  │
+  │ [c] Mark as distinct              │
+  │ [d] Skip                          │
+  └───────────────────────────────────┘
+  ...
+
+> [user clicks (a) on industry, (a) on primary_contact, skips others]
+
+✓ 2 ResolutionEvents signed at chain tip:
+  - f_res_358c809b…  (industry → Manufacturing, 1 fact superseded)
+  - f_res_5722fd3b…  (primary_contact → Mary Smith, 1 fact superseded)
+[1 conflict remaining]
+```
+
+Every click was an `AskUserQuestion` button, every event is on the chain, every supersede is permanent. Same flow inside the [`canon.ultranova.io/app`](https://canon.ultranova.io/app) Web UI — the verifier can't tell which surface produced the events.
 
 ### Terminal-native skills (Claude Code)
 
-Two project-local skills under `.claude/skills/` wrap the write/conflicts/resolve tools in a click-pick UX using Claude Code's `AskUserQuestion` (no text-syntax to memorise — actual UI buttons in the terminal):
+Two project-local skills under `.claude/skills/` wrap the MCP tools in a click-pick UX using Claude Code's `AskUserQuestion` (no text-syntax to memorise — actual UI buttons in the terminal):
 
 - **`/canon-write`** — capture entity / claim / source in chat, render a preview block, then a single 3-button question (Sign / Edit / Cancel). On confirm, pipes through the shared sign-pipeline and quotes back the signed `factId` + `eventHash` + `parentHash`.
 - **`/canon-resolve [entity?]`** — call `canon_conflicts`, render a one-line overview, then `AskUserQuestion` with up to 4 questions (one per conflict group), each offering the top 2 candidate values plus *"Mark as distinct records"* and *"Skip for now"*. Each click emits one signed ResolutionEvent on the chain.
@@ -260,5 +341,5 @@ For third-party-dependency license notices (incl. LGPL-3.0-or-later transitive p
 
 ## Contact
 
-Nelson Mehlis — `nelson.mehlis@igoultra.de`
+Nelson Mehlis — `nelson@ultranova.io`
 [github.com/ThePyth0nKid/canonBigHackBerlin](https://github.com/ThePyth0nKid/canonBigHackBerlin)
