@@ -92,48 +92,35 @@ interface ThreadEventBrief {
 }
 
 /**
- * Fast count of open decisions for the TopBar badge. Two cheap queries:
- *   1. how many `decide:ask:*` events exist (started threads)
- *   2. how many of those threads have a `decide:resolution:*` event
- * The badge count = (1) − (2). Critically does NOT walk the 8800-fact
- * landscape that loadDecisionInbox does — /app pays this cost on every
- * page render so it must be O(threads), not O(facts).
+ * Fast count of open decisions for the TopBar badge.
  *
- * NOTE: loadDecisionInbox returns one card per unresolved metric, which
- * may be MORE than open threads (a metric can be in conflict before any
- * thread is opened). For the TopBar we use the looser "started + unresolved
- * threads" count — cheap to compute, close enough for a nudge badge.
+ * One SQL aggregation: count distinct (entity, metricKey) pairs where the
+ * active facts span more than one distinct metricValue. That's the same
+ * "needsHumanResolve" definition `buildMetricGroup` uses, but computed
+ * server-side without walking the 8800-row landscape into Node memory.
+ *
+ * Result matches inbox.count (the number of cards visible on /decide), so
+ * the TopBar badge and the visible cards stay consistent — clicking
+ * "Decide" on a card decrements the badge live (resolution event flips
+ * losers to status='superseded', the GROUP BY drops them, count drops by 1).
  */
 export async function loadDecisionBadge(
   userId: string,
   workspace: string = 'inazuma',
 ): Promise<number> {
-  const [askRows, resolvedRows] = await Promise.all([
-    prisma.factEvent.findMany({
-      where: {
-        userId,
-        workspace,
-        sourceRef: { startsWith: 'decide:ask:' },
-        status: 'active',
-      },
-      select: { sourceRef: true },
-    }),
-    prisma.factEvent.findMany({
-      where: {
-        userId,
-        workspace,
-        sourceRef: { startsWith: 'decide:resolution:' },
-      },
-      select: { sourceRef: true },
-    }),
-  ]);
-  const askThreadIds = new Set(
-    askRows.map((r) => r.sourceRef.replace('decide:ask:', '')),
-  );
-  for (const r of resolvedRows) {
-    askThreadIds.delete(r.sourceRef.replace('decide:resolution:', ''));
-  }
-  return askThreadIds.size;
+  const rows = await prisma.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*)::bigint AS count FROM (
+      SELECT 1 FROM "FactEvent"
+      WHERE "userId" = ${userId}
+        AND "workspace" = ${workspace}
+        AND "status" = 'active'
+        AND "metricKey" IS NOT NULL
+      GROUP BY "entity", "metricKey"
+      HAVING COUNT(DISTINCT "metricValue") > 1
+    ) AS conflicts;
+  `;
+  const c = rows[0]?.count;
+  return c === undefined ? 0 : Number(c);
 }
 
 export async function loadDecisionInbox(
