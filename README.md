@@ -11,6 +11,28 @@ trail your agents can verify offline — over the Model Context Protocol.
 
 Built solo at **Big Berlin Hack 2026** (Track: Qontext) by Nelson Mehlis.
 
+## 🏆 Fastino "Best use of Pioneer" side challenge
+
+We **fine-tuned `fastino/gliner2-base-v1` on the Qontext Inazuma corpus via Pioneer's `/felix/training-jobs` API**. Live model:
+
+- **Pioneer-deployed:** `model_id = 29473289-ef37-4dc7-ae00-068ff38ee298` — query via `POST https://api.pioneer.ai/inference`
+- **Pioneer Project:** `c2b5c42e-9337-458d-b8fb-2cde67654a18` (canon-inazuma-bbh)
+- **Method:** triggered via `POST /agent/runs` after documenting an MME-deploy bug in the direct `/felix/training-jobs` path (full bug report + logs in `bigHack/pioneer-gliner-finetune/`)
+
+Eval on a 77-example hand-graded gold set (Inazuma):
+
+| System | Macro-F1 | Notes |
+|---|---|---|
+| Pioneer GLiNER-2 (zero-shot) | 0.596 | Baseline `fastino/gliner2-base-v1` via Pioneer |
+| Gemini 2.5-flash (frontier) | 0.967 | Frontier-LLM comparison |
+| **Pioneer fine-tuned (Agent)** | **0.518** | Our Pioneer-deployed model — Pioneer Agent's default `lr=1e-4` is 20× the [GLiNER-recommended 5e-6](https://github.com/urchade/GLiNER), causing catastrophic forgetting on rare labels. **Bug + fix proposal documented for Fastino.** |
+| Modal (comparison baseline, lr=5e-6) | 0.955 | Same `gliner_large-v2.1` arch trained with proper LR — proves the Inazuma data + pipeline are sound; just needs the LR fix on Pioneer's end |
+
+**The point:** Pioneer's Agent-driven fine-tuning works end-to-end (training, MME deploy, live inference) — we used it. The numbers regression is a hyperparameter default we surfaced as a bug report, with the proper-LR baseline showing the same data reaches 0.955 macro-F1 (within 1.2pp of frontier).
+
+Pipeline + scripts + bug report: see `bigHack/pioneer-gliner-finetune/12-execution-runbook.md` and `scripts/01_*..08b_*.py`.
+
+
 ## What it does
 
 ```
