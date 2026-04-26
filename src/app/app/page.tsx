@@ -37,7 +37,7 @@ const FEATURED_SLUGS = [
 ];
 
 interface WorkspacePageProps {
-  searchParams: Promise<{ focus?: string }>;
+  searchParams: Promise<{ focus?: string; cosign_error?: string }>;
 }
 
 export default async function WorkspacePage({ searchParams }: WorkspacePageProps) {
@@ -50,6 +50,7 @@ export default async function WorkspacePage({ searchParams }: WorkspacePageProps
   const wsMeta = WORKSPACES[0];
   const params = await searchParams;
   const focusSlug = params.focus?.toLowerCase().replace(/[^a-z0-9_]/g, '') ?? null;
+  const cosignError = params.cosign_error ?? null;
   // Cheap badge query: O(threads), not O(facts). Runs in parallel with the
   // header — must NOT call loadFactLandscape, which walks 8800 rows.
   const decisionBadge = await loadDecisionBadge(userId, activeWorkspace);
@@ -76,6 +77,20 @@ export default async function WorkspacePage({ searchParams }: WorkspacePageProps
               </span>
             </div>
           </div>
+
+          {cosignError && (
+            <div className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-[12px] text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300">
+              4-eyes magic-link {cosignError === 'expired'
+                ? 'expired'
+                : cosignError === 'not_admin'
+                  ? 'recipient is no longer in the admin list'
+                  : cosignError === 'bad_signature'
+                    ? 'signature did not verify'
+                    : 'invalid'}
+              . You can still co-sign manually below if your email is on the
+              admin list.
+            </div>
+          )}
 
           {/* 4-eyes pending tracker — sits ABOVE AskCanon when there are
               pending high-risk picks. Hidden when empty so it doesn't take

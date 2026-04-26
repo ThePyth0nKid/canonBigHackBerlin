@@ -6,6 +6,10 @@ import { prisma } from '@/lib/prisma';
 import { auth } from '@/auth';
 import { CanonSigner } from '@/lib/canon/sign';
 import { riskTier, type RiskTier } from '@/lib/canon/risk-tier';
+import {
+  sendCosignRequestEmails,
+  pickCosignRecipients,
+} from '@/lib/canon/cosign-mail';
 
 /**
  * User-pick conflict resolution.
@@ -160,6 +164,35 @@ async function runCanonicalResolution(args: {
         notes: `pending:awaiting-cosign:tier=high:initiator=${initiatorEmail || userId}:winner=${args.winnerFactId}:losers=${losers.map((l) => l.id).join(',')}`,
       },
     });
+
+    // Fire cosign-request email(s) to every admin ≠ initiator. Wrapped
+    // in a try/catch so a Resend outage doesn't fail the pending write
+    // — the event is on the chain, the panel will surface it, the
+    // email is the convenience layer for remote cosigners.
+    const recipients = pickCosignRecipients(initiatorEmail);
+    if (recipients.length > 0) {
+      const baseUrl =
+        process.env.NEXT_PUBLIC_BASE_URL ??
+        process.env.AUTH_URL ??
+        'https://canon.ultranova.io';
+      try {
+        await sendCosignRequestEmails({
+          resolutionFactId,
+          initiatorEmail: initiatorEmail || userId,
+          recipientEmails: recipients,
+          entity: args.entity,
+          entityDisplay: winner.entity,
+          metricKey: args.metricKey,
+          metricValue: winner.metricValue ?? '(no value)',
+          metricUnit: winner.metricUnit ?? null,
+          willSupersedeCount: losers.length,
+          baseUrl,
+        });
+      } catch (e) {
+        // Audit: the FactEvent is already on the chain. Email is best-effort.
+        console.warn('[resolve:fourEyes] cosign-mail failed', (e as Error).message);
+      }
+    }
 
     revalidatePath('/app');
     return { ok: true, superseded: 0, resolutionFactId, tier, pending: true };
