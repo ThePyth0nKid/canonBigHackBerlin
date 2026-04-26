@@ -111,37 +111,12 @@ function errorBlock(msg: string) {
 /** Cached demo workspace user-id (resolved at boot). */
 let DEMO_USER_ID: string | null = null;
 
-/**
- * Pick the user who OWNS the live demo data, not just the most recent login.
- *
- * Original heuristic was `findFirst orderBy createdAt desc` — that broke
- * silently when a fresh user got created (test fixture, magic-link flow,
- * new signup) between sessions: the MCP would re-route to a 0-fact user
- * and the demo would say "no facts" with no obvious cause.
- *
- * Fix: route to whoever has the most active facts in the live workspace.
- * Falls back to the most-recent user only if no facts exist anywhere yet
- * (genuinely empty DB at first boot).
- */
 async function resolveDemoUserId(): Promise<string> {
   if (DEMO_USER_ID) return DEMO_USER_ID;
-  // Hard-code 'inazuma' here (don't reference DEFAULT_WORKSPACE — it's
-  // declared later in the file; using it here would be a TDZ error).
-  const ownersByFactCount = await prisma.factEvent.groupBy({
-    by: ['userId'],
-    where: { status: 'active', workspace: 'inazuma' },
-    _count: { _all: true },
-    orderBy: { _count: { userId: 'desc' } },
-    take: 1,
-  });
-  if (ownersByFactCount.length > 0) {
-    DEMO_USER_ID = ownersByFactCount[0].userId;
-    return DEMO_USER_ID;
-  }
-  const fallback = await prisma.user.findFirst({ orderBy: { createdAt: 'desc' } });
-  if (!fallback) throw new Error('no users in database — run the seed first');
-  DEMO_USER_ID = fallback.id;
-  return fallback.id;
+  const user = await prisma.user.findFirst({ orderBy: { createdAt: 'desc' } });
+  if (!user) throw new Error('no users in database — run the seed first');
+  DEMO_USER_ID = user.id;
+  return user.id;
 }
 
 // ---------------------------------------------------------------------------

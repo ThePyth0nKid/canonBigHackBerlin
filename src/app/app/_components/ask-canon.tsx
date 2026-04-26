@@ -27,9 +27,8 @@
 
 import { useState, useTransition } from 'react';
 import { askCanonAction } from '../_actions/ask-canon';
-import { searchWebContextAction } from '../_actions/web-context';
+import { searchWebContextAction, type WebContextResult } from '../_actions/web-context';
 import type { CanonAnswer, CanonCitation } from '@/lib/canon/ask';
-import type { CachedExternalResult } from '@/lib/canon/web-context';
 import { AskFightCard } from './ask-fight-card';
 import { BrandChip, brandFor } from './ask-source-brand';
 
@@ -472,7 +471,7 @@ function CitationCard({ index, cite }: { index: number; cite: CanonCitation }) {
  * UI cannot accidentally burn the day's Tavily quota during demo rehearsal.
  * -------------------------------------------------------------------------- */
 function ExternalContextSection({ question }: { question: string }) {
-  const [data, setData] = useState<CachedExternalResult | null>(null);
+  const [data, setData] = useState<WebContextResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, start] = useTransition();
 
@@ -534,6 +533,21 @@ function ExternalContextSection({ question }: { question: string }) {
           ×
         </button>
       </header>
+
+      {/* Trust-gradient subtitle — names the limitation up-front so a
+          mis-disambiguated web hit (e.g. "PLC = Programmable Logic
+          Controller" returned for "Bright Plc") teaches the audience
+          why signed > unsigned, not "Tavily is broken". */}
+      <p className="mt-2 text-[11px] leading-snug text-sky-800/90 dark:text-sky-200/80">
+        Web-search by name — may surface unrelated entities with the same
+        name. The signed answer above is verified; everything below is
+        best-effort hearsay.
+        {data && data.wasEnhanced && (
+          <span className="block mt-1 font-mono text-[10px] text-sky-700/70 dark:text-sky-300/60">
+            query sent to Tavily: <span className="text-sky-900 dark:text-sky-100">“{data.effectiveQuery}”</span> (we appended “company” because we recognised an entity)
+          </span>
+        )}
+      </p>
 
       {pending && (
         <p className="mt-2 font-mono text-[11px] text-sky-700 dark:text-sky-300">
