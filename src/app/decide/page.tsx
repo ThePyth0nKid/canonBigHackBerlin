@@ -1,10 +1,11 @@
-import { auth, signOut } from '@/auth';
+import { auth } from '@/auth';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { loadDecisionInbox, loadOpenAuthorAsks } from '@/lib/canon/decide-view';
 import { verifyMagicToken } from '@/lib/canon/decide-mail';
 import { DecisionCard } from './_components/decision-card';
 import { AuthorResponsePanel } from './_components/author-response-panel';
+import { TopBar } from '../_components/top-bar';
 
 export const dynamic = 'force-dynamic';
 
@@ -68,8 +69,9 @@ export default async function DecidePage({ searchParams }: PageProps) {
     focusThreadId !== null && focusedCards !== null && focusedCards.length === 0;
 
   return (
-    <main className="flex flex-1 flex-col px-6 py-10">
-      <div className="mx-auto w-full max-w-3xl">
+    <main className="flex flex-1 flex-col">
+      <TopBar activeTab="decisions" openCount={inbox.count} userEmail={email} />
+      <div className="mx-auto w-full max-w-3xl px-6 pb-10">
         <header className="mb-6 space-y-3">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -80,32 +82,7 @@ export default async function DecidePage({ searchParams }: PageProps) {
                 truth · pending
               </span>
             </div>
-            <form
-              action={async () => {
-                'use server';
-                await signOut({ redirectTo: '/' });
-              }}
-            >
-              <button
-                type="submit"
-                className="text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200"
-              >
-                Sign out
-              </button>
-            </form>
           </div>
-          <p className="text-[13px] text-zinc-600 dark:text-zinc-400">
-            {email ? <span className="font-mono text-[11px]">{email}</span> : null}
-            {' · '}
-            <span className="font-mono text-[11px]">inazuma</span>
-            {' · '}
-            <Link
-              href="/app"
-              className="text-sky-600 hover:underline dark:text-sky-400"
-            >
-              ledger view →
-            </Link>
-          </p>
           <p className="text-[13px] leading-relaxed text-zinc-700 dark:text-zinc-300">
             {isMagicLinkScope
               ? `You were asked about one specific conflict. ${inbox.count - 1} other open decision${inbox.count - 1 === 1 ? '' : 's'} in this workspace stay hidden — you only see what was routed to you.`

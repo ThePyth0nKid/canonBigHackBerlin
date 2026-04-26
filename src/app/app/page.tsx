@@ -1,5 +1,5 @@
 import { Suspense } from 'react';
-import { auth, signOut } from '@/auth';
+import { auth } from '@/auth';
 import { redirect } from 'next/navigation';
 import {
   loadEntitiesBySlugs,
@@ -8,6 +8,7 @@ import {
   loadSourceStatuses,
   WORKSPACES,
 } from '@/lib/canon/view';
+import { loadDecisionBadge } from '@/lib/canon/decide-view';
 import { AikidoRepoBanner } from './_components/aikido-banner';
 import { SyncButton } from './_components/sync-button';
 import { FileDropIngest } from './_components/file-drop-ingest';
@@ -15,6 +16,7 @@ import { EntitySection } from './_components/entity-section';
 import { TailLoader } from './_components/tail-loader';
 import { ConnectedSources } from './_components/connected-sources';
 import { AskCanon } from './_components/ask-canon';
+import { TopBar } from '../_components/top-bar';
 
 export const dynamic = 'force-dynamic';
 
@@ -43,16 +45,16 @@ export default async function WorkspacePage({ searchParams }: WorkspacePageProps
   const activeWorkspace = 'inazuma';
   const wsMeta = WORKSPACES[0];
   const params = await searchParams;
-  // /decide cards link here as `/app?focus=<slug>#entity-<slug>`. We force the
-  // focused slug into the initial featured render so non-featured entities
-  // (bright_plc, ellis_group, etc.) still appear above the fold for the
-  // browser's anchor-scroll. Without this they'd only show after a TailLoader
-  // click, and the deep-link would land on a blank /app.
   const focusSlug = params.focus?.toLowerCase().replace(/[^a-z0-9_]/g, '') ?? null;
+  // Cheap badge query: O(threads), not O(facts). Runs in parallel with the
+  // header — must NOT call loadFactLandscape, which walks 8800 rows.
+  const decisionBadge = await loadDecisionBadge(userId, activeWorkspace);
+  const userEmail = (session.user as { email?: string | null }).email ?? null;
 
   return (
-    <main className="flex flex-1 flex-col px-6 py-10">
-      <div className="mx-auto w-full max-w-5xl">
+    <main className="flex flex-1 flex-col">
+      <TopBar activeTab="ledger" openCount={decisionBadge} userEmail={userEmail} />
+      <div className="mx-auto w-full max-w-5xl px-6 pb-10">
         <header className="space-y-5">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -63,19 +65,6 @@ export default async function WorkspacePage({ searchParams }: WorkspacePageProps
                 signed ledger
               </span>
             </div>
-            <form
-              action={async () => {
-                'use server';
-                await signOut({ redirectTo: '/' });
-              }}
-            >
-              <button
-                type="submit"
-                className="text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200"
-              >
-                Sign out
-              </button>
-            </form>
           </div>
 
           {/* Ask-Canon hero — sits directly under the H1 because the

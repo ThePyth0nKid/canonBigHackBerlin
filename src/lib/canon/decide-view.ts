@@ -91,6 +91,51 @@ interface ThreadEventBrief {
   status: string;
 }
 
+/**
+ * Fast count of open decisions for the TopBar badge. Two cheap queries:
+ *   1. how many `decide:ask:*` events exist (started threads)
+ *   2. how many of those threads have a `decide:resolution:*` event
+ * The badge count = (1) − (2). Critically does NOT walk the 8800-fact
+ * landscape that loadDecisionInbox does — /app pays this cost on every
+ * page render so it must be O(threads), not O(facts).
+ *
+ * NOTE: loadDecisionInbox returns one card per unresolved metric, which
+ * may be MORE than open threads (a metric can be in conflict before any
+ * thread is opened). For the TopBar we use the looser "started + unresolved
+ * threads" count — cheap to compute, close enough for a nudge badge.
+ */
+export async function loadDecisionBadge(
+  userId: string,
+  workspace: string = 'inazuma',
+): Promise<number> {
+  const [askRows, resolvedRows] = await Promise.all([
+    prisma.factEvent.findMany({
+      where: {
+        userId,
+        workspace,
+        sourceRef: { startsWith: 'decide:ask:' },
+        status: 'active',
+      },
+      select: { sourceRef: true },
+    }),
+    prisma.factEvent.findMany({
+      where: {
+        userId,
+        workspace,
+        sourceRef: { startsWith: 'decide:resolution:' },
+      },
+      select: { sourceRef: true },
+    }),
+  ]);
+  const askThreadIds = new Set(
+    askRows.map((r) => r.sourceRef.replace('decide:ask:', '')),
+  );
+  for (const r of resolvedRows) {
+    askThreadIds.delete(r.sourceRef.replace('decide:resolution:', ''));
+  }
+  return askThreadIds.size;
+}
+
 export async function loadDecisionInbox(
   userId: string,
   workspace: string = 'inazuma',
