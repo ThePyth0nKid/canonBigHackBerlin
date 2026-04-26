@@ -5,6 +5,7 @@ import { loadDecisionInbox, loadOpenAuthorAsks } from '@/lib/canon/decide-view';
 import { readPersonaContext } from '@/lib/canon/persona-cookie';
 import { DecisionCard } from './_components/decision-card';
 import { AuthorResponsePanel } from './_components/author-response-panel';
+import { HowItWorks } from './_components/how-it-works';
 import { exitPersonaAction } from './_actions/decide-actions';
 import { TopBar } from '../_components/top-bar';
 
@@ -83,6 +84,10 @@ export default async function DecidePage({ searchParams }: PageProps) {
                   : `${inbox.count} open conflict${inbox.count === 1 ? '' : 's'} that auto-resolution couldn't settle. Each decision below becomes signed canon for every agent in the workspace.`}
           </p>
         </header>
+
+        {!prefilledRespondingAs && inbox.count > 0 && (
+          <HowItWorks />
+        )}
 
         {prefilledRespondingAs && (
           <div className="mb-4 rounded-xl border-2 border-sky-400 bg-sky-50 p-4 dark:border-sky-700 dark:bg-sky-950/50">

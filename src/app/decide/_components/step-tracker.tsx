@@ -56,28 +56,62 @@ function lineClass(beforeIdx: number, active: number): string {
 export function StepTracker({ stage, skipAsk = false }: StepTrackerProps) {
   const active = activeIndex(stage);
   return (
-    <div className="flex items-center gap-1 py-2">
-      {DOTS.map((d, i) => {
-        const isAskDot = d.key === 'ask';
-        const skipped = isAskDot && skipAsk && active <= 1;
-        const cls = skipped
-          ? 'bg-zinc-200 border-zinc-300 text-zinc-500 line-through dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-500'
-          : dotClass(i, active, stage);
-        return (
-          <div key={d.key} className="flex flex-1 items-center gap-1">
-            <div
-              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold ${cls}`}
-              aria-label={skipped ? `${d.label} (skipped)` : d.label}
-              title={skipped ? `${d.label} (skipped — no human authors)` : d.label}
-            >
-              {skipped ? '–' : i < active ? '✓' : i === active && stage === 'resolved' ? '✓' : i + 1}
+    <div className="py-2">
+      {/* Row 1 — dots + connecting lines. */}
+      <div className="flex items-center gap-1">
+        {DOTS.map((d, i) => {
+          const isAskDot = d.key === 'ask';
+          const skipped = isAskDot && skipAsk && active <= 1;
+          const cls = skipped
+            ? 'bg-zinc-200 border-zinc-300 text-zinc-500 line-through dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-500'
+            : dotClass(i, active, stage);
+          return (
+            <div key={d.key} className="flex flex-1 items-center gap-1">
+              <div
+                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold ${cls}`}
+                aria-label={skipped ? `${d.label} (skipped)` : d.label}
+                title={skipped ? `${d.label} (skipped — no human authors)` : d.label}
+              >
+                {skipped ? '–' : i < active ? '✓' : i === active && stage === 'resolved' ? '✓' : i + 1}
+              </div>
+              {i < DOTS.length - 1 && (
+                <div className={`h-0.5 flex-1 ${lineClass(i, active)}`} />
+              )}
             </div>
-            {i < DOTS.length - 1 && (
-              <div className={`h-0.5 flex-1 ${lineClass(i, active)}`} />
-            )}
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
+      {/* Row 2 — text labels under each dot so the tracker reads without
+          hover. Active label is bold; skipped is muted + line-through. */}
+      <div className="mt-1 flex items-start gap-1">
+        {DOTS.map((d, i) => {
+          const isAskDot = d.key === 'ask';
+          const skipped = isAskDot && skipAsk && active <= 1;
+          const isActive = i === active;
+          const isDone = i < active;
+          const labelCls = skipped
+            ? 'text-zinc-400 line-through dark:text-zinc-600'
+            : isActive
+              ? 'font-semibold text-zinc-900 dark:text-zinc-100'
+              : isDone
+                ? 'text-emerald-700 dark:text-emerald-400'
+                : 'text-zinc-500 dark:text-zinc-500';
+          return (
+            <div key={d.key} className="flex flex-1 items-center gap-1">
+              <span
+                className={`block w-7 shrink-0 text-center font-mono text-[9px] uppercase leading-tight tracking-wider ${labelCls}`}
+              >
+                {d.label.split(' ').map((w, j) => (
+                  <span key={j} className="block">
+                    {w}
+                  </span>
+                ))}
+              </span>
+              {i < DOTS.length - 1 && <span aria-hidden className="h-0.5 flex-1" />}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

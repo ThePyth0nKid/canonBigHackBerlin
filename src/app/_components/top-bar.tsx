@@ -36,11 +36,7 @@ export function TopBar({ activeTab, openCount, userEmail }: TopBarProps) {
         />
       </div>
       <div className="flex items-center gap-3">
-        {userEmail && (
-          <span className="hidden font-mono text-[10px] text-zinc-500 sm:inline">
-            {userEmail}
-          </span>
-        )}
+        {userEmail && <SignedInBadge email={userEmail} />}
         <form
           action={async () => {
             'use server';
@@ -56,6 +52,39 @@ export function TopBar({ activeTab, openCount, userEmail }: TopBarProps) {
         </form>
       </div>
     </nav>
+  );
+}
+
+/**
+ * Shows the signed-in user clearly at all viewport sizes. The avatar
+ * carries the user's initial; the email + role line is suppressed only
+ * on the smallest screens where the avatar alone is enough to anchor
+ * identity. The sign-out button stays adjacent so the connection
+ * "this account → this signed canon" is visible to the demo audience
+ * without hover tooltips.
+ */
+function SignedInBadge({ email }: { email: string }) {
+  const initial = email.trim()[0]?.toUpperCase() ?? '?';
+  return (
+    <span
+      className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-zinc-50 py-0.5 pl-0.5 pr-2.5 dark:border-zinc-800 dark:bg-zinc-900"
+      title={`Signed in as ${email}`}
+    >
+      <span
+        aria-hidden
+        className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 font-mono text-[11px] font-semibold text-white"
+      >
+        {initial}
+      </span>
+      <span className="hidden flex-col leading-tight sm:flex">
+        <span className="font-mono text-[9px] uppercase tracking-wider text-zinc-500">
+          signed in
+        </span>
+        <span className="font-mono text-[11px] text-zinc-800 dark:text-zinc-200">
+          {email}
+        </span>
+      </span>
+    </span>
   );
 }
 
